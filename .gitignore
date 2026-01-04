@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*_checkpoint.ipynb
+
+# Logs
+*.log
+log/
+logs/
+*.out
+
+# Data and models
+data/
+docs/
+model/*
+
+# Experiment outputs
+results/
+
+# Baselines - ignore all baseline directories but keep README
+baselines/*
+!baselines/README.md
+
+# Old code backup
+old/
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+.cache/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+htmlcov/
+*.cover
+
+# PyTest
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Environment variables and credentials
+.env
+.env.local
+*.env
+credentials.yaml
+
+# Weights & Biases
+wandb/
+
+# DeepSpeed
+ds_config*.json
+
+# Tensorboard
+runs/
+tb_logs/

@@ -1,0 +1,48 @@
+# Knowledge Graph Configuration
+# Configuration for knowledge graph construction and processing
+
+# Paths configuration
+paths:
+  data_root: "./data"
+  model_root: "./model"
+  output_root: "./experiments/results"
+  cache_root: "./data/preprocessed"
+
+# Services configuration
+services:
+  llm:
+    provider: "gpt"  # LLM provider: gpt | deepseek | gemini | ollama
+
+# Knowledge Graph Configuration
+kg:
+  # Text processing
+  chunk_size: 512
+  chunk_overlap: 12
+
+  # Entity extraction
+  entity_extraction:
+    llm_model: "gemini-2.5-flash"  # LLM model for entity extraction
+    batch_size: 10  # Async batch size (matches max_async_calls in llm_api.yaml)
+
+  # Graph construction
+  graph:
+    similarity_threshold: 0.8  # For embedding-based edge augmentation
+    enable_augmentation: true
+
+  # Personalized PageRank
+  ppr:
+    alpha: 0.85  # Teleport probability
+    epsilon: 1e-4  # Convergence threshold
+    max_iterations: 100
+    adaptive_cutoff: true  # Use adaptive cutoff vs fixed top-k
+
+  # Query generation
+  query_generation:
+    num_queries: 10  # Number of augmented queries to generate
+
+# Logging and Monitoring
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./experiments/logs/ark.log"
+  console: true

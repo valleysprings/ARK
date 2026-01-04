@@ -1,0 +1,31 @@
+# Alignment Scoring Configuration
+# Configuration for triple alignment scoring in Answer-Centric Retrieval
+
+# Knowledge Graph Configuration
+kg:
+  # Text processing
+  chunk_size: 512
+  chunk_overlap: 12
+
+# Training Configuration
+training:
+  # Common settings
+  common:
+    device: "cuda"  # Device for model inference: cuda | cpu
+    seed: 42
+
+  # Qwen Embedding Training
+  qwen:
+    # Triple alignment scoring
+    alignment:
+      forward_weight: 1.0    # P(answer|chunk, question)
+      backward_weight: 0.3   # P(question|chunk, answer)
+      parameter_weight: 1.0  # cosine(query_emb, chunk_emb)
+      batch_size: 64  # Batch size for embedding computation
+      normalize_scores: true  # Whether to normalize individual alignment scores
+      top_m: 10  # Number of positive chunks to select
+
+# Logging
+logging:
+  level: "INFO"
+  console: true

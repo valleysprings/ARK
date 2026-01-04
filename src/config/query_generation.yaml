@@ -1,0 +1,38 @@
+# Query Generation Configuration
+
+# Dataset configuration
+dataset:
+  type: "hotpotqa"  # hotpotqa, musique, 2wikimultihopqa, etc.
+  raw_data_dir: "./data/raw"
+  preprocessed_dir: "./data/preprocessed"
+
+# Subgraph configuration
+subgraph:
+  size: "large"  # large | small
+  directory: "./data/preprocessed/{dataset_type}/subgraphs_answer_{subgraph_size}"
+  # File format: {dataset_type}_{index}.pkl
+
+  # Adaptive cutoff parameters (min_k controls minimum subgraph size)
+  min_k_large: 20  # Large subgraphs: at least 20 entities before finding cutoff
+  min_k_small: 10  # Small subgraphs: at least 10 entities before finding cutoff
+
+# Output configuration
+output:
+  directory: "./data/preprocessed/{dataset_type}/queries_{subgraph_size}"
+  filename_format: "generated_queries_{start}_{end}.json"
+
+# LLM configuration
+llm:
+  provider: "openai"  # gemini | openai
+  model: "gemini-2.5-flash"
+  temperature: 0.7
+
+# Generation parameters
+generation:
+  num_queries: 10  # Number of queries to generate per subgraph
+
+# Processing range
+# Note: These can be overridden by command line arguments
+range:
+  start_index: 0
+  end_index: 10

@@ -1,0 +1,61 @@
+# LLM Inference Configuration
+# Configuration for LLM backbone used in inference (entity extraction, generation, etc.)
+
+# Paths configuration
+paths:
+  data_root: "./data"
+  model_root: "./model"
+  output_root: "./experiments/results"
+  cache_root: "./data/preprocessed"
+
+# LLM Service Configuration
+services:
+  # LLM for entity extraction and generation
+  llm:
+    provider: "gemini"  # Options: gemini | deepseek | gpt
+    model: "gemini-2.5-flash"
+    api_key: "${GEMINI_API_KEY}"  # Set via environment variable
+    temperature: 0.7
+    max_tokens: 4096
+    timeout: 60
+
+  # Embedding service
+  embedding:
+    provider: "ollama"  # Options: ollama | api
+    model: "bge-m3:latest"
+    endpoint: "http://localhost:11434"
+    timeout: 30
+
+  # Reranker (optional)
+  reranker:
+    enabled: false
+    model: "bge-reranker"
+    top_k: 10
+
+# Generator (LLM) - Uses Ollama
+generator:
+  provider: "ollama"
+  endpoint: "http://localhost:11434"
+  model: "mistral-16k:latest"  # Options: mistral-16k:latest | qwen2:7b
+  max_new_tokens: 512
+  temperature: 0.1
+  top_p: 0.9
+  timeout: 60
+
+# RAG Pipeline Options
+pipeline:
+  max_context_length: 4096  # Maximum context for LLM
+  context_strategy: "truncate"  # truncate | summarize
+
+# Logging and Monitoring
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./experiments/logs/ark.log"
+  console: true
+
+# Token Tracking
+token_tracking:
+  enabled: true
+  track_costs: true
+  log_file: "./experiments/logs/token_usage.jsonl"

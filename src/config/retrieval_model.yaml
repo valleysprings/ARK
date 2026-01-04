@@ -1,0 +1,61 @@
+# Retrieval Model Configuration
+# Configuration for retrieval models used in inference
+
+# Paths configuration
+paths:
+  data_root: "./data"
+  model_root: "./model"
+  output_root: "./experiments/results"
+  cache_root: "./data/preprocessed"
+
+# Retriever Configuration
+retriever:
+  # Retriever selection - set 'type' to choose which retriever to use
+  type: "qwen"  # Options: qwen | bge (jina/stella: auto-download from HuggingFace)
+
+  # Qwen3-Embedding Configuration
+  qwen:
+    model_path: "model/raw/qwen3"  # Default: use base model
+    # model_path: "model/finetuned/qwen3/fin_legal/nolabel/chunk512_384/checkpoint-150"  # Fine-tuned model
+    top_k: 5
+    chunk_size: 512
+    overlap: 12
+    score_threshold: 0.0
+
+  # BGE-M3 Multi-Vector Configuration
+  bge:
+    model_path: "model/raw/bge-m3"
+    top_k: 10
+    chunk_size: 512
+    overlap: 12
+    # Multi-vector weights
+    dense_weight: 1.0      # Dense embedding weight
+    sparse_weight: 0.3     # Sparse (lexical) weight
+    colbert_weight: 1.0    # ColBERT weight
+    # Reranker
+    use_reranker: false
+    reranker_model: "model/raw/bge-reranker"
+    rerank_top_k: 5
+
+  # Jina Embeddings v3 Configuration (NOT DOWNLOADED - will auto-download from HuggingFace if used)
+  jina:
+    model_path: "jinaai/jina-embeddings-v3"
+    top_k: 5
+    chunk_size: 512
+    overlap: 12
+    trust_remote_code: true
+
+  # Stella v5 Configuration (NOT DOWNLOADED - will auto-download from HuggingFace if used)
+  stella:
+    model_path: "NovaSearch/stella_en_1.5B_v5"  # Fixed: correct HuggingFace ID
+    top_k: 5
+    chunk_size: 512
+    overlap: 12
+    query_prompt_name: "s2p_query"  # Stella-specific prompt
+
+# Logging and Monitoring
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./experiments/logs/ark.log"
+  console: true
