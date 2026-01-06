@@ -76,16 +76,6 @@ Configuration files in `src/config/`:
 | HippoRAG | 36.13 | 29.23 | 32.94 | 27.15 | 29.06 |
 | **ARK (Ours)** | **36.19** | **32.59** | **38.03** | **40.16** | **37.86** |
 
-## Citation
-
-```bibtex
-@article{zhou2025ark,
-  title={ARK: Answer-Centric Retriever Tuning via KG-augmented Curriculum Learning},
-  author={Zhou, Jiawei and Ding, Hang and Jiang, Haiyun},
-  journal={arXiv preprint arXiv:2511.16326},
-  year={2025}
-}
-```
 
 ## Acknowledgments
 
@@ -104,6 +94,25 @@ Configuration files in `src/config/`:
 - [MemoRAG](https://github.com/qhjqhj00/MemoRAG)
 - [GraphRAG](https://github.com/microsoft/graphrag)
 - [Nano-GraphRAG](https://github.com/gusye1234/nano-graphrag)
+
+
+## Citation
+
+```bibtex
+@article{zhou2025ark,
+  title={ARK: Answer-Centric Retriever Tuning via KG-augmented Curriculum Learning},
+  author={Zhou, Jiawei and Ding, Hang and Jiang, Haiyun},
+  journal={arXiv preprint arXiv:2511.16326},
+  year={2025}
+}
+
+@misc{zhou2025ark_repo,
+  author={Zhou, Jiawei and Ding, Hang},
+  title={ARK: Answer-centric Retriever via KG-driven Curriculum Learning},
+  year={2025},
+  url={https://github.com/valleysprings/ARK},
+}
+```
 
 ## License
 
