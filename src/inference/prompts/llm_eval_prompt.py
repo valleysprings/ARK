@@ -1,8 +1,9 @@
 """
 LLM-based pairwise comparison evaluation prompts
+For comparing answers from two different retrieval models
 """
 
-# Pairwise comparison prompt - compares prediction against ground truth
+# Pairwise comparison prompt - compares two model answers
 LLM_EVAL_PROMPT = """---Role---
 You are an expert evaluator. Your task is to rigorously assess two answers to a specific question, based on a provided Ground Truth. You will use two criteria: Faithfulness and Conciseness.
 

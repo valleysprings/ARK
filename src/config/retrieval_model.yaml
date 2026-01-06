@@ -18,7 +18,7 @@ retriever:
     model_path: "model/raw/qwen3"  # Default: use base model
     # model_path: "model/finetuned/qwen3/fin_legal/nolabel/chunk512_384/checkpoint-150"  # Fine-tuned model
     top_k: 5
-    chunk_size: 128
+    chunk_size: 512
     overlap: 12
     score_threshold: 0.0
 
@@ -26,7 +26,7 @@ retriever:
   bge:
     model_path: "model/raw/bge-m3"
     top_k: 5
-    chunk_size: 128
+    chunk_size: 512
     overlap: 12
     # Multi-vector weights
     dense_weight: 1.0      # Dense embedding weight
@@ -41,7 +41,7 @@ retriever:
   jina:
     model_path: "jinaai/jina-embeddings-v3"
     top_k: 5
-    chunk_size: 128
+    chunk_size: 512
     overlap: 12
     trust_remote_code: true
 
@@ -49,7 +49,7 @@ retriever:
   stella:
     model_path: "NovaSearch/stella_en_1.5B_v5"  # Fixed: correct HuggingFace ID
     top_k: 5
-    chunk_size: 128
+    chunk_size: 512
     overlap: 12
     query_prompt_name: "s2p_query"  # Stella-specific prompt
 

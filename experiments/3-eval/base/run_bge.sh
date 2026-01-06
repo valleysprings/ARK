@@ -1,7 +1,6 @@
 #!/bin/bash
 # BGE-M3 Base Model Evaluation
-# Usage: bash run_bge.sh [eval_mode] [dataset] [limit]
-# eval_mode: f1, llm, or both (default: f1)
+# Usage: bash run_bge.sh [dataset] [limit]
 
 set -e
 
@@ -12,9 +11,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 # Change to project root
 cd "${PROJECT_ROOT}"
 
-EVAL_MODE=${1:-"f1"}
-DATASET=${2:-"hotpotqa"}
-LIMIT=${3:-100}
+DATASET=${1:-"hotpotqa"}
+LIMIT=${2:-100}
 
 # Log setup
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -33,7 +31,6 @@ DEVICE="cuda:0"
 echo "=================================================="
 echo "ARK Evaluation - BGE-M3 (Base)"
 echo "=================================================="
-echo "Eval mode: ${EVAL_MODE}"
 echo "Dataset: ${DATASET}"
 echo "Limit: ${LIMIT} samples"
 echo "=================================================="
@@ -44,8 +41,7 @@ PYTHONPATH="${PROJECT_ROOT}" python src/inference/run_inference.py \
     --llm-config "${LLM_CONFIG}" \
     --retrieval-config "${RETRIEVAL_CONFIG}" \
     --device "${DEVICE}" \
-    --limit "${LIMIT}" \
-    --eval-mode "${EVAL_MODE}"
+    --limit "${LIMIT}"
 
 echo ""
 echo "✅ BGE evaluation completed!"

@@ -12,9 +12,9 @@ paths:
 services:
   # LLM for entity extraction and generation
   llm:
-    provider: "gemini"  # Options: gemini | deepseek | gpt
-    model: "gemini-2.5-flash"
-    api_key: "${GEMINI_API_KEY}"  # Set via environment variable
+    provider: "gpt"  # Options: gemini | deepseek | gpt
+    model: "gpt-4.1"
+    api_key: "${OPENAI_API_KEY}"  # Set via environment variable
     temperature: 0.7
     max_tokens: 4096
     timeout: 60
@@ -40,7 +40,7 @@ generator:
   max_new_tokens: 512
   temperature: 0.1
   top_p: 0.9
-  num_ctx: 2048  # Context window size for Ollama
+  num_ctx: 8192  # Context window size for Ollama
   timeout: 60
 
 # Logging and Monitoring
