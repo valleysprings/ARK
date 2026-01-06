@@ -69,7 +69,7 @@ def load_config(config_path: Optional[str] = None) -> SubgraphConfig:
         SubgraphConfig object with loaded settings
 
     Example:
-        >>> config = load_config("/home/jiawei/ARK/config.yaml")
+        >>> config = load_config("./config.yaml")
         >>> config.ppr.alpha
         0.85
     """

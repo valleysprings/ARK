@@ -595,7 +595,7 @@ def main():
                         help='Input JSONL file with questions, answers, and contexts')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Output directory for individual score files (one per sample)')
-    parser.add_argument('--config', type=str, default='/home/jiawei/ARK/config.yaml',
+    parser.add_argument('--config', type=str, default='./config.yaml',
                         help='Path to config.yaml')
     parser.add_argument('--lm_model', type=str, required=True,
                         help='Path to language model')
