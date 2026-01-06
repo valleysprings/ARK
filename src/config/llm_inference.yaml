@@ -40,12 +40,8 @@ generator:
   max_new_tokens: 512
   temperature: 0.1
   top_p: 0.9
+  num_ctx: 2048  # Context window size for Ollama
   timeout: 60
-
-# RAG Pipeline Options
-pipeline:
-  max_context_length: 4096  # Maximum context for LLM
-  context_strategy: "truncate"  # truncate | summarize
 
 # Logging and Monitoring
 logging:

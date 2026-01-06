@@ -28,6 +28,7 @@ kg:
   graph:
     similarity_threshold: 0.8  # For embedding-based edge augmentation
     enable_augmentation: true
+    embedding_batch_size: 128  # Batch size for entity embedding generation
 
   # Personalized PageRank
   ppr:

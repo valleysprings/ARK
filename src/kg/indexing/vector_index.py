@@ -2,7 +2,7 @@ import asyncio
 import os
 from dataclasses import dataclass
 import numpy as np
-from .storage import NanoVectorDB
+from src.kg.indexing.storage import NanoVectorDB
 
 @dataclass
 class NanoVectorDBStorage():

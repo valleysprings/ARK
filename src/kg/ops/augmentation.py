@@ -69,13 +69,26 @@ class AugmentationConfig:
         enable_augmentation: Whether to enable graph augmentation
         embedding_batch_size: Batch size for embedding generation
         vectordb_namespace: Namespace for vector database
-        working_dir: Directory for storing vector database files
+        working_dir: Base directory for storing vector database files
+        dataset_name: Dataset name for organizing files
+        entry_id: Entry ID for per-entry storage
     """
     similarity_threshold: float = 0.8
     enable_augmentation: bool = True
     embedding_batch_size: int = 128
     vectordb_namespace: str = "entities"
-    working_dir: str = "./data/preprocessed/entity_embeddings"
+    working_dir: str = "./data/preprocessed"
+    dataset_name: str = "default"
+    entry_id: str = None
+
+    def get_entity_embeddings_dir(self) -> str:
+        """Get the directory for entity embeddings based on dataset name."""
+        return f"{self.working_dir}/{self.dataset_name}/entity_embeddings"
+
+    def get_entity_embeddings_file(self) -> str:
+        """Get the file path for entity embeddings based on entry_id."""
+        base_dir = self.get_entity_embeddings_dir()
+        return f"{base_dir}/{self.entry_id}.json"
 
     @classmethod
     def from_config(cls, config_path: str) -> "AugmentationConfig":
@@ -121,9 +134,11 @@ class AugmentationConfig:
         return cls(
             similarity_threshold=graph_config.get('similarity_threshold', 0.8),
             enable_augmentation=graph_config.get('enable_augmentation', True),
-            embedding_batch_size=128,  # Not in config, using default
+            embedding_batch_size=graph_config.get('embedding_batch_size', 128),
             vectordb_namespace="entities",
-            working_dir=paths_config.get('cache_root', './data/preprocessed') + '/entity_embeddings'
+            working_dir=paths_config.get('cache_root', './data/preprocessed'),
+            dataset_name=config.get('dataset_name', 'default'),
+            entry_id=config.get('entry_id', None)
         )
 
 
@@ -483,19 +498,26 @@ class GraphAugmentor:
         Returns:
             NanoVectorDBStorage instance with embeddings
         """
-        namespace = namespace or self.config.vectordb_namespace
+        # Use entry_id as namespace if available
+        if self.config.entry_id:
+            namespace = self.config.entry_id
+        else:
+            namespace = namespace or self.config.vectordb_namespace
 
         # Check if we already have a vectorizer and don't need to recompute
         if self.vectorizer is not None and not force_recompute:
             logger.info("Using cached vectorizer")
             return self.vectorizer
 
+        # Use dataset-specific directory
+        working_dir = self.config.get_entity_embeddings_dir()
+
         # Compute embeddings
         self.vectorizer = await compute_entity_embeddings(
             entities_data=entities_data,
             embedding_func=self.embedding_func,
             namespace=namespace,
-            working_dir=self.config.working_dir,
+            working_dir=working_dir,
             batch_size=self.config.embedding_batch_size
         )
 

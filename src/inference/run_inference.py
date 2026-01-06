@@ -7,6 +7,7 @@ Runs inference using UnifiedRetriever with experiment config
 import argparse
 import json
 import yaml
+import torch
 from pathlib import Path
 from typing import Dict, Any
 
@@ -15,7 +16,57 @@ from src.inference.unified_retriever import (
     text_to_chunks,
     llm_generate
 )
-from src.inference.metrics import qa_f1_score, DATASET2PROMPT
+from src.inference.metrics import qa_f1_score
+from src.inference.prompts.dataset_prompts import DATASET2PROMPT
+from src.inference.prompts.llm_eval_prompt import LLM_EVAL_PROMPT
+
+
+import re
+
+
+def llm_eval_score(prediction: str, ground_truth: str, question: str,
+                   llm_endpoint: str, llm_model: str, llm_num_ctx: int) -> dict:
+    """
+    Use LLM pairwise comparison to evaluate prediction against ground truth.
+    Answer 1 = prediction, Answer 2 = ground truth answer.
+    Returns a dict with winner info and numeric score.
+    """
+    eval_prompt = LLM_EVAL_PROMPT.format(
+        ground_truth=ground_truth,
+        question=question,
+        answer1=prediction,
+        answer2=ground_truth
+    )
+
+    response = llm_generate(eval_prompt, llm_endpoint, llm_model, llm_num_ctx)
+
+    # Parse JSON response
+    result = {
+        "winner": "None",
+        "score": 0.0,
+        "raw_response": response
+    }
+
+    try:
+        # Extract JSON from response
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            eval_result = json.loads(json_match.group())
+            overall_winner = eval_result.get("Overall Winner", {}).get("Winner", "None")
+            result["winner"] = overall_winner
+
+            # Convert winner to score
+            # Answer 1 = prediction, Answer 2 = ground truth
+            if overall_winner == "Answer 1":
+                result["score"] = 1.0  # Prediction wins
+            elif overall_winner == "Tie":
+                result["score"] = 0.5
+            else:  # Answer 2 or None
+                result["score"] = 0.0
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+    return result
 
 
 def load_config(llm_config_path: str = None, retrieval_config_path: str = None, exp_config_path: str = None) -> Dict[str, Any]:
@@ -85,7 +136,7 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
         output_path: Path to save results
     """
     # Initialize retriever
-    retriever = UnifiedRetriever(config)
+    retriever = UnifiedRetriever(config, device=args.device)
 
     # Get configuration
     retriever_config = config["inference"]["retriever"]
@@ -98,6 +149,7 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
     generator_config = config["inference"]["generator"]
     llm_endpoint = generator_config["endpoint"]
     llm_model = generator_config["model"]
+    llm_num_ctx = generator_config.get("num_ctx", 16384)  # Default: 16384
 
     # Get dataset name for prompt
     dataset_name = Path(dataset_path).stem
@@ -110,6 +162,7 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
     print(f"Dataset: {dataset_name}")
     print(f"Chunk size: {chunk_size}, Overlap: {overlap}")
     print(f"LLM: {llm_model} @ {llm_endpoint}")
+    print(f"Eval mode: {args.eval_mode}")
     print(f"=" * 60)
 
     # Load dataset
@@ -122,6 +175,8 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
 
     results = []
     total_f1 = 0.0
+    total_llm = 0.0
+    eval_mode = args.eval_mode
 
     for idx, entry in enumerate(dataset, 1):
         context = entry.get("context", "")
@@ -132,6 +187,54 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
         if isinstance(answer, list) and len(answer) > 0:
             answer = answer[0]
 
+        # Handle no_retrieval mode: skip chunking and use full context
+        if model_type == "no_retrieval":
+            # Use full context directly without chunking or retrieval
+            context_text = context
+            prompt = prompt_template.format(
+                context=context_text,
+                input=question
+            )
+            # Generate answer
+            prediction = llm_generate(prompt, llm_endpoint, llm_model, llm_num_ctx)
+
+            # Compute scores based on eval_mode
+            f1 = 0.0
+            llm_result = {"score": 0.0, "winner": "None"}
+            if eval_mode in ["f1", "both"]:
+                f1 = qa_f1_score(prediction, answer)
+                total_f1 += f1
+            if eval_mode in ["llm", "both"]:
+                llm_result = llm_eval_score(prediction, answer, question, llm_endpoint, llm_model, llm_num_ctx)
+                total_llm += llm_result["score"]
+
+            # Save result
+            result = {
+                "question": question,
+                "answer": answer,
+                "prediction": prediction,
+                "num_chunks_used": 0,
+                "chunk_scores": []
+            }
+            if eval_mode in ["f1", "both"]:
+                result["f1_score"] = f1
+            if eval_mode in ["llm", "both"]:
+                result["llm_score"] = llm_result["score"]
+                result["llm_winner"] = llm_result["winner"]
+            results.append(result)
+
+            # Print progress
+            if idx % 10 == 0 or idx == len(dataset):
+                progress_str = f"[{idx}/{len(dataset)}]"
+                if eval_mode in ["f1", "both"]:
+                    progress_str += f" Avg F1: {total_f1 / idx:.4f}"
+                if eval_mode in ["llm", "both"]:
+                    progress_str += f" Avg LLM: {total_llm / idx:.4f}"
+                print(progress_str)
+
+            continue
+
+        # Standard retrieval mode: chunk and retrieve
         # Split into chunks
         chunks = text_to_chunks(context, chunk_size, overlap)
 
@@ -153,27 +256,42 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
         )
 
         # Generate answer
-        prediction = llm_generate(prompt, llm_endpoint, llm_model)
+        prediction = llm_generate(prompt, llm_endpoint, llm_model, llm_num_ctx)
 
-        # Compute F1
-        f1 = qa_f1_score(prediction, answer)
-        total_f1 += f1
+        # Compute scores based on eval_mode
+        f1 = 0.0
+        llm_result = {"score": 0.0, "winner": "None"}
+        if eval_mode in ["f1", "both"]:
+            f1 = qa_f1_score(prediction, answer)
+            total_f1 += f1
+        if eval_mode in ["llm", "both"]:
+            llm_result = llm_eval_score(prediction, answer, question, llm_endpoint, llm_model, llm_num_ctx)
+            total_llm += llm_result["score"]
 
         # Save result
         result = {
             "question": question,
             "answer": answer,
             "prediction": prediction,
-            "f1_score": f1,
             "num_chunks_used": len(selected_chunks),
-            "chunk_scores": [score for _, score in top_chunks]
+            "chunk_scores": [score for _, score in top_chunks],
+            "retrieved_chunks": selected_chunks
         }
+        if eval_mode in ["f1", "both"]:
+            result["f1_score"] = f1
+        if eval_mode in ["llm", "both"]:
+            result["llm_score"] = llm_result["score"]
+            result["llm_winner"] = llm_result["winner"]
         results.append(result)
 
         # Print progress
         if idx % 10 == 0 or idx == len(dataset):
-            avg_f1 = total_f1 / idx
-            print(f"[{idx}/{len(dataset)}] Avg F1: {avg_f1:.4f}")
+            progress_str = f"[{idx}/{len(dataset)}]"
+            if eval_mode in ["f1", "both"]:
+                progress_str += f" Avg F1: {total_f1 / idx:.4f}"
+            if eval_mode in ["llm", "both"]:
+                progress_str += f" Avg LLM: {total_llm / idx:.4f}"
+            print(progress_str)
 
     # Organize output paths
     dataset_name = Path(dataset_path).stem
@@ -194,24 +312,39 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
             f.write(json.dumps(result) + '\n')
 
     # Calculate and save scores to results/score/[limit_X|full]/[dataset]/[model].json
-    avg_f1 = total_f1 / len(results) if results else 0
     score_output = score_dir / f"{model_type}.json"
     score_data = {
         "model": model_type,
         "dataset": dataset_name,
         "limit": args.limit if args.limit else "full",
         "total_samples": len(results),
-        "average_f1": round(avg_f1, 4)
+        "eval_mode": eval_mode
     }
+    if eval_mode in ["f1", "both"]:
+        avg_f1 = total_f1 / len(results) if results else 0
+        score_data["f1_score"] = round(avg_f1, 4)
+    if eval_mode in ["llm", "both"]:
+        avg_llm = total_llm / len(results) if results else 0
+        score_data["llm_score"] = round(avg_llm, 4)
     with open(score_output, 'w') as f:
         json.dump(score_data, f, indent=2)
+
+    # Clean up GPU memory after retrieval
+    del retriever
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"GPU memory cleared for device: {args.device}")
 
     # Print summary
     print(f"\n" + "=" * 60)
     print(f"Inference Complete!")
     print(f"=" * 60)
     print(f"Total samples: {len(results)}")
-    print(f"Average F1: {avg_f1:.4f}")
+    print(f"Eval mode: {eval_mode}")
+    if eval_mode in ["f1", "both"]:
+        print(f"Average F1: {score_data.get('f1_score', 0):.4f}")
+    if eval_mode in ["llm", "both"]:
+        print(f"Average LLM: {score_data.get('llm_score', 0):.4f}")
     print(f"Raw results saved to: {raw_output}")
     print(f"Scores saved to: {score_output}")
     print(f"=" * 60)
@@ -270,6 +403,13 @@ def main():
         required=False,
         default=None,
         help="Limit number of samples to process (for testing)"
+    )
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        choices=["f1", "llm", "both"],
+        default="f1",
+        help="Evaluation mode: f1 (F1 score), llm (LLM evaluation), or both"
     )
 
     args = parser.parse_args()

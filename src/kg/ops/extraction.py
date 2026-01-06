@@ -2,14 +2,12 @@
 Subgraph Extraction Module for Answer-Augmented Retrieval
 
 This module provides functionality for extracting relevant subgraphs from knowledge graphs
-using Personalized PageRank (PPR) with adaptive cutoff and community search algorithms.
+using Personalized PageRank (PPR) with adaptive cutoff.
 
 Key Features:
 - Entity extraction and matching (exact and embedding-based)
 - Personalized PageRank with adaptive cutoff
-- Community search for localized subgraph extraction
 - Integration with vector database for embedding similarity
-- Configuration loading from YAML
 
 Classes:
     SubgraphExtractor: Main class for subgraph extraction workflow
@@ -17,8 +15,6 @@ Classes:
 Functions:
     personalized_pagerank: PPR algorithm implementation
     adaptive_cutoff: Adaptive threshold selection using negative log transformation
-    community_search: Community-based subgraph extraction
-    extract_and_match_entities: Entity extraction and graph matching
     match_entities_exact: Exact string matching against graph nodes
     match_entities_embedding: Embedding similarity-based matching
 """
@@ -44,12 +40,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PPRConfig:
     """Configuration for Personalized PageRank"""
-    alpha: float = 0.85  # Teleport probability (1-alpha = restart probability)
-    epsilon: float = 1e-4  # Convergence threshold
-    max_iterations: int = 100  # Maximum iterations for convergence
-    adaptive_cutoff: bool = True  # Use adaptive cutoff vs fixed top-k
-    min_k: int = 10  # Minimum number of entities for adaptive cutoff
-    max_entities: int = 10000  # Maximum entities to consider (effectively no limit)
+    alpha: float = 0.85
+    epsilon: float = 1e-4
+    max_iterations: int = 100
+    adaptive_cutoff: bool = True
+    min_k: int = 3
+    max_entities: int = 10000
 
 
 @dataclass
@@ -198,154 +194,52 @@ def personalized_pagerank(
 
 def adaptive_cutoff(
     ppr_scores: List[Tuple[str, float]],
-    min_k: int = 10,
-    max_entities: int = 10000,  # Effectively no limit
+    min_k: int = 3,
+    max_entities: int = 10000,
 ) -> List[Tuple[str, float]]:
     """
     Adaptively determine cutoff point for PPR scores using negative log transformation
 
-    Instead of using a fixed top-k, this function finds the "elbow" in the score
-    distribution where the score drops most sharply. This is done by:
-    1. Transform scores to -log(score) to emphasize small differences
-    2. Find the maximum difference between consecutive transformed scores
-    3. Cut off at that point
+    Finds the most significant "elbow" in the score distribution that gives
+    ≤max_entities. If no such elbow exists, returns max_entities.
 
     Args:
         ppr_scores: List of (entity_name, score) tuples sorted by score (descending)
-        min_k: Minimum number of entities to return (prevents cutting too early)
-        max_entities: Maximum number of entities to consider
+        min_k: Minimum number of entities to return
+        max_entities: Maximum number of entities to return
 
     Returns:
         Filtered list of (entity_name, transformed_score) tuples
-        Scores are transformed to -log(score) for better discrimination
-
-    Algorithm:
-        Given PPR scores [0.5, 0.3, 0.28, 0.05, 0.01]:
-        1. Transform: -log([0.5, 0.3, 0.28, 0.05, 0.01]) = [0.69, 1.20, 1.27, 3.00, 4.61]
-        2. Differences: [0.51, 0.07, 1.73, 1.61]
-        3. Max difference at index 2 → cutoff after 3rd element
-        4. Return top 3 entities
-
-    Example:
-        >>> ppr_scores = [("A", 0.5), ("B", 0.3), ("C", 0.28), ("D", 0.05), ("E", 0.01)]
-        >>> result = adaptive_cutoff(ppr_scores, min_k=2)
-        >>> result
-        [('A', 0.69), ('B', 1.20), ('C', 1.27)]
-
-    Note:
-        - Scores of 0 are filtered out (would cause -log(0) = inf)
-        - Negative log transformation makes small score differences more visible
-        - This method works best when there's a clear distinction between
-          relevant and irrelevant entities
     """
     # Transform scores using negative log
-    # This amplifies differences in small probabilities
     transformed_scores = []
     for entity, score in ppr_scores:
-        if score > 0:  # Avoid log(0)
+        if score > 0:
             transformed_scores.append((entity, -np.log(score)))
-        else:
-            # Skip zero scores
-            continue
 
-    # Need at least min_k entities to find a cutoff
-    if len(transformed_scores) <= min_k:
+    # Adjust min_k if max_entities is smaller
+    effective_min_k = min(min_k, max_entities)
+
+    # Need at least effective_min_k entities
+    if len(transformed_scores) <= effective_min_k:
         return transformed_scores
 
-    # Limit to max_entities
-    transformed_scores = transformed_scores[:max_entities]
-
-    # Find maximum difference in transformed scores
-    max_diff = 0.0
-    max_diff_index = min_k
-
-    for i in range(min_k, len(transformed_scores)):
-        # Difference between consecutive scores
+    # Find differences between consecutive scores
+    diffs = []
+    for i in range(1, len(transformed_scores)):
         diff = transformed_scores[i][1] - transformed_scores[i-1][1]
-        if diff > max_diff:
-            max_diff = diff
-            max_diff_index = i
+        diffs.append((i, diff))
 
-    # Return entities up to the cutoff point
-    return transformed_scores[:max_diff_index]
+    # Sort by diff descending to find significant drops
+    sorted_diffs = sorted(diffs, key=lambda x: x[1], reverse=True)
 
+    # Find the most significant cutoff point that gives ≤max_entities
+    for cutoff_idx, diff in sorted_diffs:
+        if effective_min_k <= cutoff_idx <= max_entities:
+            return transformed_scores[:cutoff_idx]
 
-# ============================================================================
-# Community Search
-# ============================================================================
-
-def community_search(
-    graph: nx.Graph,
-    seed_nodes: Set[str],
-    max_hops: int = 2,
-    max_size: int = 100,
-) -> Set[str]:
-    """
-    Extract a local community around seed nodes using BFS expansion
-
-    Community search finds a connected subgraph containing seed nodes and their
-    local neighborhood. This is useful for extracting focused context without
-    running full PPR on large graphs.
-
-    Args:
-        graph: NetworkX graph to search
-        seed_nodes: Set of seed entity names to start from
-        max_hops: Maximum distance (hops) from seed nodes to explore
-        max_size: Maximum number of nodes in the community
-
-    Returns:
-        Set of entity names in the extracted community
-
-    Algorithm:
-        1. Initialize community with seed nodes
-        2. For each hop level (1 to max_hops):
-           a. Find all neighbors of current frontier
-           b. Add neighbors to community (up to max_size)
-           c. Update frontier to newly added nodes
-        3. Return community
-
-    Example:
-        >>> G = nx.Graph()
-        >>> G.add_edges_from([
-        ...     ("A", "B"), ("B", "C"), ("C", "D"),
-        ...     ("A", "E"), ("E", "F")
-        ... ])
-        >>> community = community_search(G, {"A"}, max_hops=2)
-        >>> sorted(community)
-        ['A', 'B', 'C', 'E', 'F']  # D is 3 hops away, excluded
-
-    Note:
-        - BFS ensures nodes are added in order of proximity to seeds
-        - Respects max_size limit to prevent excessive growth
-        - Useful for local context extraction in large graphs
-    """
-    community = set(seed_nodes)
-    frontier = set(seed_nodes)
-
-    for hop in range(max_hops):
-        if len(community) >= max_size:
-            break
-
-        # Find neighbors of current frontier
-        next_frontier = set()
-        for node in frontier:
-            if node in graph:
-                neighbors = set(graph.neighbors(node))
-                next_frontier.update(neighbors)
-
-        # Add new nodes to community (up to max_size)
-        new_nodes = next_frontier - community
-        remaining_capacity = max_size - len(community)
-
-        if remaining_capacity <= 0:
-            break
-
-        # Add as many new nodes as we can
-        new_nodes_list = list(new_nodes)[:remaining_capacity]
-        community.update(new_nodes_list)
-        frontier = set(new_nodes_list)
-
-    return community
+    # No valid cutoff found, return up to max_entities
+    return transformed_scores[:min(max_entities, len(transformed_scores))]
 
 
 # ============================================================================
@@ -579,8 +473,9 @@ class SubgraphExtractor:
         self,
         seed_entities: Set[str],
         use_adaptive: bool = True,
-        use_community_search: bool = False,
         top_k: Optional[int] = None,
+        max_entities: Optional[int] = None,
+        min_k: Optional[int] = None,
     ) -> Tuple[List[str], Dict[str, float]]:
         """
         Extract subgraph from seed entities using PPR
@@ -588,21 +483,12 @@ class SubgraphExtractor:
         Args:
             seed_entities: Set of seed entity names (must exist in graph)
             use_adaptive: Use adaptive cutoff (True) or fixed top-k (False)
-            use_community_search: Use community search instead of PPR
             top_k: Fixed top-k (only used if use_adaptive=False)
+            max_entities: Maximum entities for adaptive cutoff
+            min_k: Minimum entities for adaptive cutoff
 
         Returns:
-            Tuple of (entity_list, ppr_scores_dict):
-                - entity_list: Ordered list of entity names
-                - ppr_scores_dict: Dictionary mapping entities to scores
-
-        Example:
-            >>> seed_entities = {"APPLE INC", "IPHONE"}
-            >>> entities, scores = await extractor.extract_subgraph_from_seeds(
-            ...     seed_entities, use_adaptive=True
-            ... )
-            >>> entities[:5]
-            ['APPLE INC', 'IPHONE', 'TIM COOK', 'IOS', 'APP STORE']
+            Tuple of (entity_list, ppr_scores_dict)
         """
         if not seed_entities:
             logger.warning("No seed entities provided")
@@ -615,19 +501,6 @@ class SubgraphExtractor:
             return [], {}
 
         logger.info(f"Valid seed entities: {valid_seeds}")
-
-        # Use community search (faster, more local)
-        if use_community_search:
-            community = community_search(
-                self.graph,
-                valid_seeds,
-                max_hops=2,
-                max_size=self.config.ppr.max_entities,
-            )
-            # Create uniform scores for community members
-            scores = {entity: 1.0 for entity in community}
-            entity_list = list(community)
-            return entity_list, scores
 
         # Use Personalized PageRank (more global, score-based)
         personalization = {entity: 1.0 for entity in valid_seeds}
@@ -646,10 +519,12 @@ class SubgraphExtractor:
         # Apply adaptive cutoff or fixed top-k
         if use_adaptive and self.config.ppr.adaptive_cutoff:
             # Transform to -log and find adaptive cutoff
+            max_ent = max_entities if max_entities is not None else self.config.ppr.max_entities
+            min_ent = min_k if min_k is not None else self.config.ppr.min_k
             filtered_scores = adaptive_cutoff(
                 sorted_scores,
-                min_k=self.config.ppr.min_k,
-                max_entities=self.config.ppr.max_entities,
+                min_k=min_ent,
+                max_entities=max_ent,
             )
             # Convert back to dict (scores are now -log transformed)
             entity_list = [entity for entity, _ in filtered_scores]
@@ -670,41 +545,21 @@ class SubgraphExtractor:
         query_text: str,
         algorithm: Optional[str] = None,
         use_adaptive: bool = True,
-        use_community_search: bool = False,
         top_k: Optional[int] = None,
         entity_extraction_func = None,
     ) -> Tuple[List[str], Dict[str, float]]:
         """
         Extract subgraph from query text (end-to-end pipeline)
 
-        This is the main entry point that combines entity extraction and
-        subgraph extraction.
-
         Args:
             query_text: Input text (question or answer)
             algorithm: "exact" or "emb" (if None, uses config default)
             use_adaptive: Use adaptive cutoff
-            use_community_search: Use community search instead of PPR
             top_k: Fixed top-k (for exact matching or final output)
             entity_extraction_func: Custom entity extraction function
 
         Returns:
             Tuple of (entity_list, scores_dict)
-
-        Pipeline:
-            1. Extract entities from query_text
-            2. Match entities to graph (exact or embedding)
-            3. Run PPR or community search from matched entities
-            4. Apply adaptive cutoff or top-k
-            5. Return ranked entity list
-
-        Example:
-            >>> query = "What are Apple's main products?"
-            >>> entities, scores = await extractor.extract_subgraph(
-            ...     query, algorithm="exact", use_adaptive=True
-            ... )
-            >>> for entity in entities[:10]:
-            ...     print(f"{entity}: {scores[entity]:.3f}")
         """
         algo = algorithm if algorithm is not None else self.config.algorithm
 
@@ -760,7 +615,6 @@ class SubgraphExtractor:
         entity_list, scores_dict = await self.extract_subgraph_from_seeds(
             seed_entities,
             use_adaptive=use_adaptive,
-            use_community_search=use_community_search,
             top_k=top_k,
         )
 
@@ -792,51 +646,3 @@ class SubgraphExtractor:
             else:
                 logger.warning(f"Entity not found in graph: {entity}")
         return entity_data
-
-
-# ============================================================================
-# Convenience Functions
-# ============================================================================
-
-async def extract_subgraph_from_text(
-    text: str,
-    graph: nx.Graph,
-    vectordb = None,
-    config_path: Optional[str] = None,
-    algorithm: str = "exact",
-    use_adaptive: bool = True,
-) -> Tuple[List[str], Dict[str, float]]:
-    """
-    Convenience function for end-to-end subgraph extraction
-
-    Args:
-        text: Input text (query, question, or answer)
-        graph: NetworkX knowledge graph
-        vectordb: Optional vector database for embedding matching
-        config_path: Path to config.yaml
-        algorithm: "exact" or "emb"
-        use_adaptive: Use adaptive cutoff
-
-    Returns:
-        Tuple of (entity_list, scores_dict)
-
-    Example:
-        >>> graph = await full_kg.get_graph()
-        >>> entities, scores = await extract_subgraph_from_text(
-        ...     "What does Apple sell?",
-        ...     graph,
-        ...     algorithm="exact"
-        ... )
-    """
-    config = load_config(config_path)
-    extractor = SubgraphExtractor(
-        graph=graph,
-        vectordb=vectordb,
-        config=config,
-    )
-
-    return await extractor.extract_subgraph(
-        text,
-        algorithm=algorithm,
-        use_adaptive=use_adaptive,
-    )

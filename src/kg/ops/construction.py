@@ -314,62 +314,11 @@ async def _handle_entity_relation_summary(
     llm_func: callable = google_model,
 ) -> str:
     """
-    Summarize entity or relationship descriptions when they become too long
+    Handle entity or relationship descriptions (summary disabled).
 
-    When multiple chunks mention the same entity, descriptions are concatenated.
-    If the combined description exceeds the token limit, this function
-    generates a concise summary using an LLM.
-
-    Args:
-        entity_or_relation_name: Name of entity or (src, tgt) tuple for relation
-        description: Concatenated descriptions (joined by GRAPH_FIELD_SEP)
-        llm_func: LLM function to use for summarization (default: google_model)
-
-    Returns:
-        Original description if short enough, otherwise LLM-generated summary
-
-    Note:
-        - Summary is only triggered if description exceeds 1024 tokens
-        - Uses first 16384 tokens if description is extremely long
-        - Summary maintains entity name context
-
-    Example:
-        >>> long_desc = "Desc1<SEP>Desc2<SEP>..." * 100  # Very long
-        >>> summary = await _handle_entity_relation_summary("APPLE", long_desc)
-        >>> len(encode_string_by_tiktoken(summary)) < 1024
-        True
+    Simply returns the original description without any processing.
     """
-    llm_max_tokens = 16384
-    tiktoken_model_name = "gpt-4o"
-    summary_max_tokens = 1024
-
-    # Check if summary is needed
-    tokens = encode_string_by_tiktoken(description, model_name=tiktoken_model_name)
-    if len(tokens) < summary_max_tokens:
-        return description
-
-    # Truncate description if too long
-    prompt_template = PROMPTS["summarize_entity_descriptions"]
-    use_description = decode_tokens_by_tiktoken(
-        tokens[:llm_max_tokens], model_name=tiktoken_model_name
-    )
-
-    # Format summarization prompt
-    context_base = dict(
-        entity_name=entity_or_relation_name,
-        description_list=use_description.split(GRAPH_FIELD_SEP),
-    )
-    use_prompt = prompt_template.format(**context_base)
-
-    logger.info(f"Generating summary for: {entity_or_relation_name}")
-
-    # Generate summary
-    summary = await llm_func(
-        use_prompt,
-        operation_name="entity_summarization"
-    )
-
-    return summary
+    return description
 
 
 # ============================================================================
@@ -864,11 +813,11 @@ class KGBuilder:
         # Check cache for entities
         cache_path = None
         if self.enable_cache and use_cache:
-            cache_path = Path(self.cache_dir) / f"{doc_id}_entities.pkl"
+            cache_path = Path(self.cache_dir) / f"{doc_id}_entities.json"
             if cache_path.exists():
                 logger.info(f"Loading cached extraction results for {doc_id}")
                 extraction_results = load_cache(
-                    self.cache_dir, "entities", doc_id, 0, extension="pkl"
+                    self.cache_dir, "entities", doc_id, 0, extension="json"
                 )
                 kg, entities = await build_knowledge_graph(
                     extraction_results,

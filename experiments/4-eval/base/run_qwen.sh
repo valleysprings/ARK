@@ -1,39 +1,53 @@
 #!/bin/bash
 # Qwen2.5-Embedding Base Model Evaluation
-# Usage: bash run_qwen.sh [dataset] [start_idx] [end_idx]
+# Usage: bash run_qwen.sh [eval_mode] [dataset] [limit]
+# eval_mode: f1, llm, or both (default: f1)
 
 set -e
 
-DATASET=${1:-"hotpotqa"}
-START_IDX=${2:-0}
-END_IDX=${3:-100}
+# Get the project root directory (3 levels up from this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-OUTPUT_DIR="experiments/results/base"
+# Change to project root
+cd "${PROJECT_ROOT}"
+
+EVAL_MODE=${1:-"f1"}
+DATASET=${2:-"hotpotqa"}
+LIMIT=${3:-100}
+
+# Log setup
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_DIR="${PROJECT_ROOT}/log/eval"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/qwen_${DATASET}_${LIMIT}_${TIMESTAMP}.log"
+
+exec > >(tee -a "${LOG_FILE}") 2>&1
+echo "Log file: ${LOG_FILE}"
+
 DATA_PATH="data/raw/${DATASET}.jsonl"
 LLM_CONFIG="src/config/llm_inference.yaml"
 RETRIEVAL_CONFIG="src/config/retrieval_model.yaml"
 DEVICE="cuda:0"
 
-mkdir -p "${OUTPUT_DIR}"
-
 echo "=================================================="
 echo "ARK Evaluation - Qwen2.5 Embedding (Base)"
 echo "=================================================="
+echo "Eval mode: ${EVAL_MODE}"
 echo "Dataset: ${DATASET}"
-echo "Range: ${START_IDX} to ${END_IDX}"
-echo "Output: ${OUTPUT_DIR}/${DATASET}_qwen.jsonl"
+echo "Limit: ${LIMIT} samples"
 echo "=================================================="
 
-python src/inference/run_inference.py \
+PYTHONPATH="${PROJECT_ROOT}" python src/inference/run_inference.py \
     --dataset "${DATA_PATH}" \
-    --output "${OUTPUT_DIR}/${DATASET}_qwen.jsonl" \
     --retriever qwen \
     --llm-config "${LLM_CONFIG}" \
     --retrieval-config "${RETRIEVAL_CONFIG}" \
     --device "${DEVICE}" \
-    --start-idx "${START_IDX}" \
-    --end-idx "${END_IDX}"
+    --limit "${LIMIT}" \
+    --eval-mode "${EVAL_MODE}"
 
 echo ""
 echo "✅ Qwen evaluation completed!"
-echo "Results: ${OUTPUT_DIR}/${DATASET}_qwen.jsonl"
+echo "Results saved to: results/raw/limit_${LIMIT}/${DATASET}/qwen.jsonl"
+echo "Scores saved to: results/score/limit_${LIMIT}/${DATASET}/qwen.json"

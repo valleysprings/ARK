@@ -18,37 +18,16 @@ training:
     fp16: true
     gradient_checkpointing: false
 
-  # BGE-M3 Training
-  bge:
-    enabled: true
-    model_name_or_path: "./model/bge-m3"
-
-    # Training hyperparameters
-    per_device_train_batch_size: 700
-    per_device_eval_batch_size: 128
-    gradient_accumulation_steps: 1
-    learning_rate: 1.0e-5
-    num_train_epochs: 5
-    warmup_ratio: 0.1
-    weight_decay: 0.01
-
-    # Model-specific
-    unified_finetuning: true  # Train dense/sparse/colbert jointly
-    use_self_distill: true
-    knowledge_distillation: true
-    temperature: 0.7
-    negatives_cross_device: true
-    train_group_size: 8  # 1 positive + 7 negatives
-
-    # Loss weights
-    lambda_init: 0.9  # Initial weight for teacher loss
-    lambda_final: 0.1  # Final weight for teacher loss
-    lambda_schedule: "cosine"  # cosine | linear
-
   # Qwen Embedding Training
   qwen:
     enabled: true
-    model_name_or_path: "Qwen/Qwen3-Embedding-0.6B"
+    model_name_or_path: "./model/raw/qwen3"
+
+    # Dataset Configuration
+    datasets:
+      fin:
+        enabled: true
+        limit: null  # null means use all data, or set a number like 1000
 
     # Training hyperparameters
     per_device_train_batch_size: 8
@@ -70,6 +49,23 @@ training:
       stage1_epochs: 3  # Initial alignment
       stage2_epochs: 4  # Coarse-grained (large subgraph)
       stage3_epochs: 3  # Fine-grained (small subgraph)
+
+      # Stage-specific configuration
+      stage1:
+        num_positives: 5  # Top-k chunks from alignment as positives
+        num_negatives: 16  # Number of negatives per sample
+
+      stage2:
+        num_positives: 5  # Top-k chunks from alignment as positives
+        num_negatives: 16  # Number of negatives per sample
+        use_in_batch_negatives: false  # Do not use in-batch negatives
+        retrieval_top_k: 10  # Top-k chunks to retrieve per query
+
+      stage3:
+        num_positives: 5  # Top-k chunks from alignment as positives
+        num_negatives: 16  # Number of negatives per sample
+        use_in_batch_negatives: false  # Do not use in-batch negatives
+        retrieval_top_k: 10  # Top-k chunks to retrieve per query
 
     # Loss function
     loss_type: "cosine_similarity"  # For MS-SWIFT
@@ -103,7 +99,7 @@ evaluation:
 
   # Evaluation settings
   batch_size: 16
-  max_samples: -1  # -1 for all samples
+  max_samples: 100  # -1 for all samples
   save_predictions: true
 
 # Logging and Monitoring

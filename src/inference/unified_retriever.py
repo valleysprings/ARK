@@ -18,7 +18,7 @@ from sentence_transformers import SentenceTransformer
 import requests
 
 # Import prompts
-from .prompts import DATASET2PROMPT, ULTRADOMAIN_PROMPT
+from src.inference.prompts import DATASET2PROMPT, ULTRADOMAIN_PROMPT
 
 
 def normalize_answer(s):
@@ -66,7 +66,7 @@ class UnifiedRetriever:
     - Stella v5
     """
 
-    SUPPORTED_MODELS = ["qwen", "bge", "jina", "stella"]
+    SUPPORTED_MODELS = ["qwen", "bge", "jina", "stella", "no_retrieval"]
 
     def __init__(self, config: Dict[str, Any], device: str = "cuda:0"):
         """
@@ -87,8 +87,13 @@ class UnifiedRetriever:
             raise ValueError(f"Unsupported model type: {self.model_type}. "
                            f"Choose from: {self.SUPPORTED_MODELS}")
 
-        print(f"Initializing {self.model_type.upper()} retriever...")
-        self._load_model()
+        if self.model_type == "no_retrieval":
+            print(f"Initializing NO_RETRIEVAL mode (LLM only, no chunking/retrieval)...")
+            self.model = None
+            self.top_k = 0
+        else:
+            print(f"Initializing {self.model_type.upper()} retriever...")
+            self._load_model()
 
     def _load_model(self):
         """Load the appropriate model based on config"""
@@ -150,7 +155,10 @@ class UnifiedRetriever:
         Returns:
             List of (chunk_index, score) tuples, sorted by score descending
         """
-        if self.model_type == "qwen":
+        if self.model_type == "no_retrieval":
+            # Return all chunks with dummy scores (not used in no_retrieval mode)
+            return [(i, 1.0) for i in range(len(chunks))]
+        elif self.model_type == "qwen":
             return self._retrieve_qwen(query, chunks)
         elif self.model_type == "bge":
             return self._retrieve_bge(query, chunks)
@@ -250,20 +258,21 @@ class UnifiedRetriever:
 
     def _retrieve_stella(self, query: str, chunks: List[str]) -> List[Tuple[int, float]]:
         """Stella Embeddings retrieval"""
-        query_emb = self.model.encode(query)
+        # Stella v5 requires prompt_name for query encoding
+        query_emb = self.model.encode(query, prompt_name="s2p_query")
         chunk_embs = self.model.encode(chunks)
 
-        # Cosine similarity
-        similarities = torch.nn.functional.cosine_similarity(
-            torch.tensor(query_emb).unsqueeze(0),
-            torch.tensor(chunk_embs),
-            dim=1
-        )
+        # Use model.similarity for proper scoring (like old implementation)
+        similarities = self.model.similarity(query_emb, chunk_embs)
 
-        top_indices = torch.argsort(similarities, descending=True)[:self.top_k]
+        # Flatten if needed (similarity returns 2D array)
+        if len(similarities.shape) > 1:
+            similarities = similarities[0]
+
+        top_indices = torch.argsort(torch.tensor(similarities), descending=True)[:self.top_k]
 
         results = [
-            (idx.item(), similarities[idx].item())
+            (idx.item(), similarities[idx].item() if hasattr(similarities[idx], 'item') else similarities[idx])
             for idx in top_indices
         ]
         return results
@@ -294,7 +303,7 @@ def text_to_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
 
 
 def llm_generate(prompt: str, endpoint: str = "http://localhost:11434",
-                model: str = "mistral:latest") -> str:
+                model: str = "mistral:latest", num_ctx: int = 16384) -> str:
     """
     Generate answer using Ollama LLM
 
@@ -302,6 +311,7 @@ def llm_generate(prompt: str, endpoint: str = "http://localhost:11434",
         prompt: Full prompt including context and question
         endpoint: Ollama endpoint
         model: Model name
+        num_ctx: Context window size (default: 16384)
 
     Returns:
         Generated answer
@@ -315,7 +325,8 @@ def llm_generate(prompt: str, endpoint: str = "http://localhost:11434",
                 "stream": False,
                 "options": {
                     "temperature": 0.1,
-                    "top_p": 0.9
+                    "top_p": 0.9,
+                    "num_ctx": num_ctx  # Explicitly set context window
                 }
             },
             timeout=60

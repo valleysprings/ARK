@@ -7,7 +7,6 @@ from knowledge graph subgraphs using LLMs.
 
 import json
 import os
-import pickle
 from typing import Dict, List, Any
 
 # Import prompts
@@ -89,7 +88,7 @@ class QueryGenerator:
             response = self.client.chat.completions.create(
                 model=self.llm_model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "system", "content": "You are a helpful assistant. Output ONLY valid JSON without any explanation or thinking process."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -134,8 +133,6 @@ class QueryGenerator:
 
         try:
             # Parse JSON response
-            # The response should be: {"confusing_questions": [...]}
-            # But LLM might add explanatory text before the JSON
             response_text = response.strip()
 
             # Strip markdown code blocks if present
@@ -148,7 +145,6 @@ class QueryGenerator:
                 response_text = '\n'.join(lines)
 
             # Find the first JSON object/array (starts with { or [)
-            # This handles cases where LLM adds explanatory text before JSON
             json_start = -1
             for i, char in enumerate(response_text):
                 if char in ['{', '[']:
@@ -170,10 +166,11 @@ class QueryGenerator:
 
             result = json.loads(response_text)
             queries = result.get("confusing_questions", [])
+            print(f"[DEBUG] Parsed {len(queries)} queries")
             return queries[:self.num_queries]
         except json.JSONDecodeError as e:
             print(f"Error parsing LLM response: {e}")
-            print(f"Raw response: {response}")
+            print(f"Response text (first 500 chars): {response_text[:500] if response_text else 'None'}")
             return []
 
     def process_subgraph_file(
@@ -185,15 +182,15 @@ class QueryGenerator:
         Process a single subgraph file and generate queries
 
         Args:
-            subgraph_path: Path to the subgraph pickle file
+            subgraph_path: Path to the subgraph json file
             original_data: Original question-answer data
 
         Returns:
             List of generated queries
         """
         # Load subgraph (old format: list of dicts)
-        with open(subgraph_path, 'rb') as f:
-            subgraph_data = pickle.load(f)
+        with open(subgraph_path, 'r', encoding='utf-8') as f:
+            subgraph_data = json.load(f)
 
         # Convert to entities list
         entities = []
@@ -206,7 +203,11 @@ class QueryGenerator:
 
         # Get original question and answer
         original_question = original_data.get("input", original_data.get("question", ""))
-        answer = original_data.get("answer", original_data.get("output", ""))
+        # Handle both "answer" (string) and "answers" (list) formats
+        answer = original_data.get("answer", "")
+        if not answer:
+            answers = original_data.get("answers", [])
+            answer = answers[0] if answers else original_data.get("output", "")
 
         # Generate queries
         queries = self.generate_queries_from_subgraph(

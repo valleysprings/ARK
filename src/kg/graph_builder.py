@@ -14,10 +14,10 @@ import yaml
 import logging
 import asyncio
 
-from .core.nx_graph import nx_graph
-from .ops.construction import KGBuilder
-from .ops.augmentation import GraphAugmentor
-from .ops.extraction import SubgraphExtractor
+from src.kg.core.nx_graph import nx_graph
+from src.kg.ops.construction import KGBuilder
+from src.kg.ops.augmentation import GraphAugmentor
+from src.kg.ops.extraction import SubgraphExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,9 @@ class KnowledgeGraph:
     async def augment(
         self,
         threshold: Optional[float] = None,
-        force_recompute_embeddings: bool = False
+        force_recompute_embeddings: bool = False,
+        dataset_name: str = None,
+        entry_id: str = None
     ) -> int:
         """
         使用相似度增强知识图谱
@@ -170,10 +172,18 @@ class KnowledgeGraph:
         Args:
             threshold: 相似度阈值（默认使用配置）
             force_recompute_embeddings: 是否强制重新计算 embeddings
+            dataset_name: 数据集名称
+            entry_id: 条目ID
 
         Returns:
             添加的边数
         """
+        # Set dataset_name and entry_id in config
+        if dataset_name:
+            self.config['dataset_name'] = dataset_name
+        if entry_id:
+            self.config['entry_id'] = entry_id
+
         if self._augmentor is None:
             self._augmentor = GraphAugmentor(config=self.config)
 
@@ -220,7 +230,7 @@ class KnowledgeGraph:
 
             # Load config for extractor
             try:
-                from .ops.extraction import load_config
+                from src.kg.ops.extraction import load_config
                 extractor_config = load_config(None)  # Will use defaults
             except:
                 extractor_config = None
@@ -297,10 +307,6 @@ class KnowledgeGraph:
         with open(file_path, 'rb') as f:
             graph = pickle.load(f)
 
-        # Handle custom graph wrapper if needed
-        if hasattr(graph, 'graph'):
-            graph = graph.graph
-
         self._graph._graph = graph
         logger.info(f"Graph loaded from {file_path}")
 
@@ -329,7 +335,7 @@ class KnowledgeGraph:
                 'llm': {'provider': 'gpt'}
             },
             'paths': {
-                'cache_root': './cache'
+                'cache_root': './data/preprocessed'
             }
         }
 
@@ -349,7 +355,6 @@ async def process_document(
     similarity_threshold: float = 0.8,
     skip_build: bool = False,
     skip_augment: bool = False,
-    skip_extract: bool = False,
 ) -> None:
     """
     Process a single document through the complete KG pipeline
@@ -365,7 +370,6 @@ async def process_document(
         similarity_threshold: Similarity threshold for augmentation
         skip_build: Skip construction step
         skip_augment: Skip augmentation step
-        skip_extract: Skip extraction step
     """
     import pickle
     from src.kg.utils.file_operations import read_source_document
@@ -411,11 +415,12 @@ async def process_document(
             kg.save(str(kg_path))
 
             # Save entities data for augmentation
-            entities_path = output_dir / "all_entities_data" / f"{doc_id}.pkl"
+            entities_path = output_dir / "entities" / f"{doc_id}.json"
             entities_path.parent.mkdir(parents=True, exist_ok=True)
             if hasattr(kg, '_entities_data'):
-                with open(entities_path, 'wb') as f:
-                    pickle.dump(kg._entities_data, f)
+                import json
+                with open(entities_path, 'w', encoding='utf-8') as f:
+                    json.dump(kg._entities_data, f, ensure_ascii=False, indent=2)
 
             logger.info(f"✓ Built KG: {num_nodes} nodes, {num_edges} edges")
             logger.info(f"✓ Saved to {kg_path}")
@@ -434,11 +439,11 @@ async def process_document(
         else:
             # Load entities data if not in memory
             if not hasattr(kg, '_entities_data'):
-                import pickle
-                entities_path = output_dir / "all_entities_data" / f"{doc_id}.pkl"
+                import json
+                entities_path = output_dir / "entities" / f"{doc_id}.json"
                 if entities_path.exists():
-                    with open(entities_path, 'rb') as f:
-                        kg._entities_data = pickle.load(f)
+                    with open(entities_path, 'r', encoding='utf-8') as f:
+                        kg._entities_data = json.load(f)
                 else:
                     logger.warning("Entities data not found, extracting from graph...")
                     # Extract from graph (fallback)
@@ -453,7 +458,11 @@ async def process_document(
                     kg._entities_data = entities_data
 
             # Augment
-            edges_added = await kg.augment(threshold=similarity_threshold)
+            edges_added = await kg.augment(
+                threshold=similarity_threshold,
+                dataset_name=dataset_type,
+                entry_id=doc_id
+            )
 
             # Save augmented KG
             aug_kg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -463,16 +472,6 @@ async def process_document(
             logger.info(f"✓ Saved to {aug_kg_path}")
 
     # ========================================================================
-    # Step 3: Extract Subgraphs (PPR-based)
-    # ========================================================================
-    if not skip_extract:
-        logger.info("\n[Step 3/3] Extracting Subgraphs...")
-
-        # For now, just log that this step would happen
-        # The actual extraction requires a query, which depends on your use case
-        logger.info("⚠️  Subgraph extraction requires queries and is use-case specific")
-        logger.info("   Use kg.extract_subgraph(query) to extract subgraphs on-demand")
-
     logger.info(f"\n{'='*70}")
     logger.info(f"✅ Completed processing document {doc_index}")
     logger.info(f"{'='*70}\n")
@@ -482,7 +481,7 @@ def main():
     import argparse
     import asyncio
     import time
-    from .utils.token_tracker import print_token_summary, print_token_details
+    from src.kg.utils.token_tracker import print_token_summary, print_token_details
 
     parser = argparse.ArgumentParser(
         description="Generate Knowledge Graphs from documents",
@@ -520,12 +519,14 @@ def main():
                         help="Skip KG construction step")
     parser.add_argument("--skip_augment", action="store_true",
                         help="Skip KG augmentation step")
-    parser.add_argument("--skip_extract", action="store_true",
-                        help="Skip subgraph extraction step")
 
     # Token tracking options
     parser.add_argument("--show_token_details", action="store_true",
                         help="Show detailed per-call token breakdown at the end")
+
+    # Parallelism control
+    parser.add_argument("--max_concurrent", type=int, default=1,
+                        help="Max concurrent documents to process (default: 1, sequential)")
 
     args = parser.parse_args()
 
@@ -552,10 +553,6 @@ def main():
             with open(args.config, 'r') as f:
                 config = yaml.safe_load(f)
 
-        # Initialize KnowledgeGraph
-        logger.info(f"Initializing KnowledgeGraph...")
-        kg = KnowledgeGraph(config=config, working_dir=str(output_dir))
-
         # Process each document
         logger.info(f"\n{'='*70}")
         logger.info(f"Processing {args.dataset} dataset")
@@ -563,26 +560,36 @@ def main():
         logger.info(f"Output: {output_dir}")
         logger.info(f"{'='*70}\n")
 
-        for idx in range(args.start_index, args.end_index):
-            try:
-                await process_document(
-                    kg=kg,
-                    input_path=input_path,
-                    doc_index=idx,
-                    dataset_type=args.dataset,
-                    output_dir=output_dir,
-                    chunk_size=args.chunk_size,
-                    chunk_overlap=args.chunk_overlap,
-                    similarity_threshold=args.similarity_threshold,
-                    skip_build=args.skip_build,
-                    skip_augment=args.skip_augment,
-                    skip_extract=args.skip_extract,
-                )
-            except Exception as e:
-                logger.error(f"Error processing document {idx}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
+        # Process documents with concurrency control
+        semaphore = asyncio.Semaphore(args.max_concurrent)
+
+        async def process_with_semaphore(idx):
+            async with semaphore:
+                try:
+                    # Create independent KG instance for each document
+                    doc_kg = KnowledgeGraph(config=config, working_dir=str(output_dir))
+                    await process_document(
+                        kg=doc_kg,
+                        input_path=input_path,
+                        doc_index=idx,
+                        dataset_type=args.dataset,
+                        output_dir=output_dir,
+                        chunk_size=args.chunk_size,
+                        chunk_overlap=args.chunk_overlap,
+                        similarity_threshold=args.similarity_threshold,
+                        skip_build=args.skip_build,
+                        skip_augment=args.skip_augment,
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing document {idx}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        # Run all documents with controlled concurrency
+        await asyncio.gather(*[
+            process_with_semaphore(idx)
+            for idx in range(args.start_index, args.end_index)
+        ])
 
         # End timing
         end_time = time.time()

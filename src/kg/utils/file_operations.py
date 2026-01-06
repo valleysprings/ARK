@@ -83,56 +83,39 @@ def parse_jsonl(file_path: str) -> List[Dict[str, Any]]:
 
 
 # ============================================================================
-# Pickle Serialization
+# Pickle Serialization (for KG files)
 # ============================================================================
 
 def pickle_dump(obj: Any, path: str) -> None:
-    """
-    Serialize an object to a pickle file
-
-    Creates the directory structure if it doesn't exist. Useful for caching
-    processed data (graphs, embeddings, entities, etc.).
-
-    Args:
-        obj: Object to serialize
-        path: Path where the pickle file will be saved
-
-    Example:
-        >>> data = {"entities": [...], "relations": [...]}
-        >>> pickle_dump(data, "./preprocessed/entities/fin_0.pkl")
-
-    Note:
-        - Automatically creates parent directories if they don't exist
-        - Overwrites existing files
-    """
-    # Create directory if it doesn't exist
+    """Serialize an object to a pickle file (used for KG data)."""
     if not os.path.exists(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-
     with open(path, "wb") as f:
         pickle.dump(obj, f)
 
 
 def pickle_read(path: str) -> Any:
-    """
-    Deserialize an object from a pickle file
-
-    Args:
-        path: Path to the pickle file
-
-    Returns:
-        Deserialized object
-
-    Example:
-        >>> data = pickle_read("./preprocessed/entities/fin_0.pkl")
-        >>> type(data)
-        <class 'dict'>
-
-    Raises:
-        FileNotFoundError: If the pickle file doesn't exist
-    """
+    """Deserialize an object from a pickle file."""
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+# ============================================================================
+# JSON Serialization (for non-KG files)
+# ============================================================================
+
+def json_dump(obj: Any, path: str) -> None:
+    """Serialize an object to a JSON file (human readable)."""
+    if not os.path.exists(os.path.dirname(path)):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def json_read(path: str) -> Any:
+    """Deserialize an object from a JSON file."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ============================================================================
@@ -269,28 +252,10 @@ def load_cache(
     index: int,
     extension: str = "pkl"
 ) -> Any:
-    """
-    Load data from cache
-
-    Args:
-        processed_dir: Base directory for processed data
-        cache_type: Type of cache
-        dataset_type: Dataset type identifier
-        index: Document index
-        extension: File extension (default: "pkl")
-
-    Returns:
-        Cached object
-
-    Example:
-        >>> entities = load_cache(
-        ...     "./preprocessed/UltraDomain",
-        ...     "entities",
-        ...     "fin",
-        ...     0
-        ... )
-    """
+    """Load data from cache. Uses pickle for .pkl, json for .json."""
     path = get_cache_path(processed_dir, cache_type, dataset_type, index, extension)
+    if extension == "json":
+        return json_read(path)
     return pickle_read(path)
 
 
@@ -302,30 +267,10 @@ def save_cache(
     index: int,
     extension: str = "pkl"
 ) -> str:
-    """
-    Save data to cache
-
-    Args:
-        obj: Object to cache
-        processed_dir: Base directory for processed data
-        cache_type: Type of cache
-        dataset_type: Dataset type identifier
-        index: Document index
-        extension: File extension (default: "pkl")
-
-    Returns:
-        Path where the cache was saved
-
-    Example:
-        >>> save_cache(
-        ...     my_entities,
-        ...     "./preprocessed/UltraDomain",
-        ...     "entities",
-        ...     "fin",
-        ...     0
-        ... )
-        './preprocessed/UltraDomain/entities/fin_0.pkl'
-    """
+    """Save data to cache. Uses pickle for .pkl, json for .json."""
     path = get_cache_path(processed_dir, cache_type, dataset_type, index, extension)
-    pickle_dump(obj, path)
+    if extension == "json":
+        json_dump(obj, path)
+    else:
+        pickle_dump(obj, path)
     return path

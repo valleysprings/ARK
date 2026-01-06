@@ -9,8 +9,8 @@ the quality of chunk-question-answer alignments using three complementary metric
 """
 
 import asyncio
+import json
 import math
-import pickle
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Callable
@@ -677,10 +677,10 @@ def main():
                 'qwen_list': result['parameter_scores']
             }
 
-            # Write to individual file with format: {dataset}_{index}.pkl
-            output_file = output_dir / f"{dataset_name}_{idx}.pkl"
-            with open(output_file, 'wb') as f:
-                pickle.dump(output, f)
+            # Write to individual file with format: {dataset}_{index}.json
+            output_file = output_dir / f"{dataset_name}_{idx}.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(output, f, ensure_ascii=False, indent=2)
 
         print(f"Done! Wrote {len(items)} files to {output_dir}/")
 
