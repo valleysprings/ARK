@@ -1,11 +1,5 @@
 """
-KnowledgeGraph 主类 - 统一的 KG 操作入口
-
-这个类封装了所有 KG 操作：
-- Construction: build_from_chunks, build_from_document
-- Augmentation: augment_with_similarity
-- Extraction: extract_subgraph
-- Access: get_graph, get_vector_index, save, load
+KnowledgeGraph main class - unified KG operation entry point
 """
 
 from typing import Optional, Dict, List, Tuple, Any
@@ -23,24 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeGraph:
-    """
-    统一的知识图谱操作接口
-
-    Example:
-        >>> kg = KnowledgeGraph(config_path="config.yaml")
-        >>>
-        >>> # 构建
-        >>> await kg.build_from_chunks(chunks)
-        >>>
-        >>> # 增强
-        >>> await kg.augment(threshold=0.8)
-        >>>
-        >>> # 提取子图
-        >>> entities, scores = await kg.extract_subgraph("What does Apple sell?")
-        >>>
-        >>> # 保存
-        >>> kg.save("./output/kg.graphml")
-    """
+    """Unified knowledge graph operation interface."""
 
     def __init__(
         self,
@@ -48,14 +25,6 @@ class KnowledgeGraph:
         config: Optional[Dict] = None,
         working_dir: Optional[str] = None
     ):
-        """
-        初始化 KnowledgeGraph
-
-        Args:
-            config_path: 配置文件路径
-            config: 配置字典（覆盖 config_path）
-            working_dir: 工作目录（缓存、向量索引等）
-        """
         # Load config
         if config is not None:
             self.config = config
@@ -89,16 +58,6 @@ class KnowledgeGraph:
         chunks: Dict[str, Dict],
         show_progress: bool = True
     ) -> Tuple[int, int]:
-        """
-        从文本块构建知识图谱
-
-        Args:
-            chunks: 文本块字典 {chunk_id: {content, ...}}
-            show_progress: 是否显示进度
-
-        Returns:
-            (num_nodes, num_edges): 节点数和边数
-        """
         if self._builder is None:
             self._builder = KGBuilder(config=self.config, cache_dir=self.working_dir)
 
@@ -121,20 +80,6 @@ class KnowledgeGraph:
         use_cache: bool = True,
         show_progress: bool = True
     ) -> Tuple[int, int]:
-        """
-        从文档构建知识图谱（自动分块）
-
-        Args:
-            document: 文档文本
-            doc_id: 文档ID（用于缓存）
-            chunk_size: 分块大小
-            overlap_size: 重叠大小
-            use_cache: 是否使用缓存
-            show_progress: 是否显示进度
-
-        Returns:
-            (num_nodes, num_edges): 节点数和边数
-        """
         if self._builder is None:
             self._builder = KGBuilder(config=self.config, cache_dir=self.working_dir)
 
@@ -166,18 +111,6 @@ class KnowledgeGraph:
         dataset_name: str = None,
         entry_id: str = None
     ) -> int:
-        """
-        使用相似度增强知识图谱
-
-        Args:
-            threshold: 相似度阈值（默认使用配置）
-            force_recompute_embeddings: 是否强制重新计算 embeddings
-            dataset_name: 数据集名称
-            entry_id: 条目ID
-
-        Returns:
-            添加的边数
-        """
         # Set dataset_name and entry_id in config
         if dataset_name:
             self.config['dataset_name'] = dataset_name
@@ -213,18 +146,6 @@ class KnowledgeGraph:
         use_adaptive: bool = True,
         top_k: Optional[int] = None
     ) -> Tuple[List[str], Dict[str, float]]:
-        """
-        从查询中提取子图
-
-        Args:
-            query: 查询文本
-            algorithm: "exact" 或 "emb"
-            use_adaptive: 是否使用自适应截断
-            top_k: Top-K 实体数
-
-        Returns:
-            (entities, scores): 实体列表和得分字典
-        """
         if self._extractor is None:
             graph = await self._graph.get_graph()
 
@@ -256,23 +177,23 @@ class KnowledgeGraph:
     # ========================================================================
 
     async def get_graph(self):
-        """获取底层 NetworkX 图"""
+        """Get underlying NetworkX graph."""
         return await self._graph.get_graph()
 
     def get_vector_index(self):
-        """获取向量索引"""
+        """Get vector index."""
         return self._vector_index
 
     async def get_node(self, node_id: str):
-        """获取节点数据"""
+        """Get node data."""
         return await self._graph.get_node(node_id)
 
     async def get_edge(self, src_id: str, tgt_id: str):
-        """获取边数据"""
+        """Get edge data."""
         return await self._graph.get_edge(src_id, tgt_id)
 
     async def get_stats(self) -> Dict[str, Any]:
-        """获取图统计信息"""
+        """Get graph statistics."""
         nodes = await self._graph.get_all_nodes()
         edges = await self._graph.get_all_edges()
 
@@ -287,7 +208,7 @@ class KnowledgeGraph:
     # ========================================================================
 
     def save(self, file_path: str):
-        """保存图到文件（pkl 格式）"""
+        """Save graph to file (pkl format)."""
         import pickle
         graph = self._graph._graph
 
@@ -301,7 +222,7 @@ class KnowledgeGraph:
         logger.info(f"Graph saved to {file_path}")
 
     def load(self, file_path: str):
-        """从文件加载图（pkl 格式）"""
+        """Load graph from file (pkl format)."""
         import pickle
 
         with open(file_path, 'rb') as f:
@@ -315,7 +236,7 @@ class KnowledgeGraph:
     # ========================================================================
 
     def _get_default_config(self) -> Dict:
-        """默认配置"""
+        """Default configuration."""
         return {
             'kg': {
                 'chunk_size': 512,
