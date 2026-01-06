@@ -26,21 +26,20 @@ cp .env.example .env  # Setup API keys
 ## Pipeline
 
 ```bash
-# 1. Alignment
-bash experiments/1-alignment/compute_alignment.sh <dataset> <start> <end> <gpu>
 
-# 2. Knowledge Graph
-bash experiments/2-kg/generate_kg.sh <dataset> <start> <end> <gpu>
+# 1. Knowledge Graph
+bash experiments/1-kg/generate_kg.sh <dataset> <start> <end> <gpu>
 
-# 3. Training Data
-bash experiments/3-training/generate_data.sh <dataset> <start> <end> <stage> <gpu>
+# 2. Generate Training Sample
+bash experiments/2-training/generate_pos.sh <dataset> <start> <end>
+bash experiments/2-training/generate_neg.sh <dataset> <start> <end> <stage> <gpu>
 
-# 4. Train
-bash experiments/3-training/train_qwen_single.sh <dataset> <stage> [output] [gpu]
-bash experiments/3-training/train_qwen_multi.sh <datasets> <stage> [output] [gpu]
+# 3. Train
+bash experiments/2-training/train_qwen_single.sh <dataset> <stage> [output] [gpu]
+bash experiments/2-training/train_qwen_multi.sh <datasets> <stage> [output] [gpu]
 
-# 5. Evaluate
-bash experiments/4-eval/finetuned/run_qwen.sh <eval_data> <train_data> <start> <end> <gpu>
+# 4. Evaluate
+bash experiments/3-eval/finetuned/run_qwen.sh <eval_data> <train_data> <start> <end> <gpu>
 ```
 
 ## Config
@@ -108,7 +107,7 @@ Configuration files in `src/config/`:
 
 @misc{zhou2025ark_repo,
   author={Zhou, Jiawei and Ding, Hang},
-  title={ARK: Answer-centric Retriever via KG-driven Curriculum Learning},
+  title={Code Repo for ARK: Answer-Centric Retriever Tuning via KG-augmented Curriculum Learning},
   year={2025},
   url={https://github.com/valleysprings/ARK},
 }

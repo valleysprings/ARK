@@ -35,7 +35,10 @@ logs/
 *.out
 
 # Data and models
-data/
+data/*
+!data/raw/
+data/raw/*
+!data/raw/README.md
 docs/
 model/*
 

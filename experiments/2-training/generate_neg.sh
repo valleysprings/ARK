@@ -10,7 +10,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 cd "${PROJECT_ROOT}"
 
-DATASET=${1:-"legal"}
+DATASET=${1:-"fin"}
 START=${2:-0}
 END=${3:-5}
 STAGE=${4:-"all"}
@@ -35,7 +35,7 @@ echo "Range: $START to $END"
 echo "Stage: $STAGE"
 echo "=================================================="
 
-PYTHONPATH="${PROJECT_ROOT}" python -m src.training.generate_data \
+PYTHONPATH="${PROJECT_ROOT}" python -m src.training.generate_neg \
     --dataset "$DATASET" \
     --start "$START" \
     --end "$END" \

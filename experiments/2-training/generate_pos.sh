@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 cd "${PROJECT_ROOT}"
 
-DATASET=${1:-"legal"}
+DATASET=${1:-"fin"}
 START_IDX=${2:-0}
 END_IDX=${3:-10}
 
@@ -35,7 +35,7 @@ echo "=================================================="
 
 mkdir -p "$OUTPUT_DIR"
 
-PYTHONPATH="${PROJECT_ROOT}" python src/alignment/scorer.py \
+PYTHONPATH="${PROJECT_ROOT}" python src/training/generate_pos.py \
     --input_jsonl "$INPUT_FILE" \
     --output_dir "$OUTPUT_DIR" \
     --config "src/config/alignment.yaml" \

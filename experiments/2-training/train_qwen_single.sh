@@ -48,7 +48,8 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage1" ]; then
     swift sft \
         --model_type qwen3_emb \
         --model "./model/raw/qwen3" \
-        --sft_type full \
+        --train_type full \
+        --add_version false \
         --dataset "$DATASET_PATH_STAGE1" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}-stage1" \
         --num_train_epochs 3 \
@@ -68,17 +69,23 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage2" ]; then
     echo "STAGE 2: Coarse-Grained Contrastive Learning"
     echo "=================================================="
 
-    # Determine input model path
+    # Determine input model path - find latest checkpoint
     if [ "$STAGE" == "stage2" ]; then
         INPUT_MODEL="./model/raw/qwen3"
     else
-        INPUT_MODEL="./model/checkpoints/${OUTPUT_NAME}-stage1"
+        # Find the latest checkpoint directory
+        STAGE1_DIR="./model/checkpoints/${OUTPUT_NAME}-stage1"
+        INPUT_MODEL=$(find "$STAGE1_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -1)
+        if [ -z "$INPUT_MODEL" ]; then
+            INPUT_MODEL="$STAGE1_DIR"
+        fi
     fi
 
     swift sft \
         --model_type qwen3_emb \
         --model "$INPUT_MODEL" \
-        --sft_type full \
+        --train_type full \
+        --add_version false \
         --dataset "$DATASET_PATH_STAGE2" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}-stage2" \
         --num_train_epochs 4 \
@@ -98,17 +105,22 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage3" ]; then
     echo "STAGE 3: Fine-Grained Contrastive Learning"
     echo "=================================================="
 
-    # Determine input model path
+    # Determine input model path - find latest checkpoint
     if [ "$STAGE" == "stage3" ]; then
         INPUT_MODEL="./model/raw/qwen3"
     else
-        INPUT_MODEL="./model/checkpoints/${OUTPUT_NAME}-stage2"
+        STAGE2_DIR="./model/checkpoints/${OUTPUT_NAME}-stage2"
+        INPUT_MODEL=$(find "$STAGE2_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -1)
+        if [ -z "$INPUT_MODEL" ]; then
+            INPUT_MODEL="$STAGE2_DIR"
+        fi
     fi
 
     swift sft \
         --model_type qwen3_emb \
         --model "$INPUT_MODEL" \
-        --sft_type full \
+        --train_type full \
+        --add_version false \
         --dataset "$DATASET_PATH_STAGE3" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}" \
         --num_train_epochs 3 \
