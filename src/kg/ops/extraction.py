@@ -93,23 +93,25 @@ def load_config(config_path: Optional[str] = None) -> SubgraphConfig:
         with open(config_path, 'r') as f:
             yaml_config = yaml.safe_load(f)
 
-        # Extract PPR settings
-        kg_config = yaml_config.get('kg', {})
-        ppr_config = kg_config.get('ppr', {})
-        graph_config = kg_config.get('graph', {})
+        graph_config = yaml_config['kg']['graph']
+
+        # Read PPR from alignment.yaml
+        align_path = Path(config_path).parent / "alignment.yaml"
+        with open(align_path, 'r') as f:
+            ppr_config = yaml.safe_load(f)['ppr']
 
         ppr = PPRConfig(
-            alpha=ppr_config.get('alpha', 0.85),
-            epsilon=ppr_config.get('epsilon', 1e-4),
-            max_iterations=ppr_config.get('max_iterations', 100),
-            adaptive_cutoff=ppr_config.get('adaptive_cutoff', True),
-            max_entities=graph_config.get('max_entities', 10000),  # No limit by default
+            alpha=ppr_config['alpha'],
+            epsilon=ppr_config['epsilon'],
+            max_iterations=ppr_config['max_iterations'],
+            adaptive_cutoff=ppr_config['adaptive_cutoff'],
+            max_entities=graph_config['max_entities'],
         )
 
         config = SubgraphConfig(
             ppr=ppr,
-            similarity_threshold=graph_config.get('similarity_threshold', 0.8),
-            enable_augmentation=graph_config.get('enable_augmentation', True),
+            similarity_threshold=graph_config['similarity_threshold'],
+            enable_augmentation=graph_config['enable_augmentation'],
         )
 
         logger.info(f"Loaded configuration from {config_path}")
@@ -182,7 +184,8 @@ def personalized_pagerank(
         alpha=alpha,
         personalization=personalization,
         max_iter=max_iterations,
-        tol=epsilon,
+        tol=float(epsilon),
+        weight=None,
     )
 
     return ppr_scores
@@ -269,14 +272,18 @@ async def match_entities_exact(
         >>> sorted(matches)
         ['APPLE INC', 'GOOGLE LLC']
     """
-    # Normalize entities to uppercase
-    normalized_entities = [entity.upper().strip() for entity in entities]
+    # Normalize: uppercase + strip quotes
+    norm = lambda s: s.upper().strip().strip('"')
 
-    # Get graph nodes
-    graph_nodes = set(graph.nodes())
+    # Build lookup: normalized node name -> original node name
+    node_lookup = {norm(n): n for n in graph.nodes()}
 
-    # Find intersection
-    matches = set(normalized_entities) & graph_nodes
+    # Match normalized entities against normalized node names
+    matches = set()
+    for entity in entities:
+        key = norm(entity)
+        if key in node_lookup:
+            matches.add(node_lookup[key])
 
     return matches
 
@@ -352,19 +359,46 @@ async def match_entities_embedding(
     return matched_entities
 
 
+def _jaccard_similarity(a: str, b: str) -> float:
+    """Token-level Jaccard similarity between two strings."""
+    sa, sb = set(a.upper().split()), set(b.upper().split())
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+async def _llm_extract_entities(text: str) -> List[str]:
+    """Extract entities from text using LLM (same pattern as coverage.py)."""
+    import json as _json
+    from src.kg.utils.llm_client import gpt_model
+    from src.kg.prompts.entity_extraction import PROMPTS
+
+    prompt = PROMPTS["query_entity_extraction"].format(input_text=text)
+    response = await gpt_model(prompt)
+    t = response.strip()
+    start = t.find("[")
+    end = t.rfind("]")
+    if start == -1 or end == -1:
+        return []
+    entities = _json.loads(t[start:end + 1])
+    return [e.upper().strip() for e in entities if isinstance(e, str)]
+
+
 async def extract_and_match_entities(
     text: str,
     graph: nx.Graph,
     algorithm: str = "exact",
-    vectordb = None,
+    vectordb=None,
     top_k: int = 10,
-    entity_extraction_func = None,
+    entity_extraction_func=None,
+    jaccard_fallback: bool = True,
+    jaccard_top_k: int = 5,
 ) -> Set[str]:
     """
-    Extract entities from text and match them to graph nodes
+    Extract entities from text via LLM and match them to graph nodes.
 
-    This is a convenience function that combines entity extraction (using LLM)
-    with entity matching (exact or embedding-based).
+    Uses LLM-based extraction (gpt_model + query_entity_extraction prompt).
+    Falls back to Jaccard similarity matching if no exact matches found.
 
     Args:
         text: Input text to extract entities from
@@ -372,49 +406,42 @@ async def extract_and_match_entities(
         algorithm: "exact" for string matching, "emb" for embedding similarity
         vectordb: Vector database (required if algorithm="emb")
         top_k: Top-k for embedding matching
-        entity_extraction_func: Optional custom entity extraction function
-
+        entity_extraction_func: Optional custom extraction function
+        jaccard_fallback: If True, use Jaccard similarity when no exact match
+        jaccard_top_k: Number of top Jaccard-similar nodes to return as fallback
     Returns:
         Set of matched entity names from the graph
-
-    Example:
-        >>> text = "Apple Inc released the new iPhone yesterday."
-        >>> matches = await extract_and_match_entities(
-        ...     text, graph, algorithm="exact"
-        ... )
-        >>> matches
-        {'APPLE INC', 'IPHONE'}
-
-    Note:
-        - Requires entity_extraction_func for actual entity extraction
-        - If not provided, falls back to simple keyword matching
-        - For embedding matching, vectordb must be provided
     """
+    # Extract entities via LLM or custom function
     if entity_extraction_func is not None:
-        # Use LLM-based entity extraction
-        # This would call the entity extraction pipeline
-        # For now, we'll use a simple placeholder
-        raise NotImplementedError(
-            "LLM-based entity extraction should be implemented using "
-            "src.utils.graph_operations.extract_entities"
-        )
+        extracted = await entity_extraction_func(text)
+    else:
+        extracted = await _llm_extract_entities(text)
 
-    # Placeholder: Simple keyword extraction (not recommended for production)
-    # In practice, use the entity extraction from src/utils/graph_operations.py
-    words = text.upper().split()
-    potential_entities = words  # Very naive approach
+    if not extracted:
+        return set()
 
     if algorithm == "exact":
-        matches = await match_entities_exact(potential_entities, graph)
+        matches = await match_entities_exact(extracted, graph)
+        # Jaccard fallback: find most similar graph nodes for each extracted entity
+        if not matches and jaccard_fallback:
+            graph_nodes = list(graph.nodes())
+            scored = []
+            for ent in extracted:
+                for node in graph_nodes:
+                    sim = _jaccard_similarity(ent, node)
+                    if sim > 0:
+                        scored.append((node, sim))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            matches = {n for n, _ in scored[:jaccard_top_k]}
+            if matches:
+                logger.info(f"Jaccard fallback matched {len(matches)} entities")
     elif algorithm == "emb":
         if vectordb is None:
             raise ValueError("vectordb is required for embedding-based matching")
-
-        # For embedding matching, we need descriptions
-        # This is a placeholder - in practice, extract entities properly
-        descriptions = [""] * len(potential_entities)
+        descriptions = [""] * len(extracted)
         matched_dict = await match_entities_embedding(
-            potential_entities, descriptions, vectordb, top_k
+            extracted, descriptions, vectordb, top_k
         )
         matches = set(matched_dict.keys())
     else:
@@ -563,49 +590,15 @@ class SubgraphExtractor:
         """
         algo = algorithm if algorithm is not None else self.config.algorithm
 
-        # Step 1: Extract and match entities
-        if algo == "exact":
-            # For exact matching, we need entity extraction first
-            # This is a placeholder - should use proper entity extraction
-            if entity_extraction_func is None:
-                # Simple fallback: use uppercase words as potential entities
-                words = query_text.upper().split()
-                seed_entities = await match_entities_exact(words, self.graph)
-            else:
-                # Use custom entity extraction
-                seed_entities = await extract_and_match_entities(
-                    query_text,
-                    self.graph,
-                    algorithm="exact",
-                    entity_extraction_func=entity_extraction_func,
-                )
-
-        elif algo == "emb":
-            # For embedding matching
-            if self.vectordb is None:
-                raise ValueError("vectordb is required for embedding-based matching")
-
-            if entity_extraction_func is None:
-                # Simple fallback
-                words = query_text.upper().split()
-                descriptions = [""] * len(words)
-                matched_dict = await match_entities_embedding(
-                    words, descriptions, self.vectordb,
-                    top_k=top_k or self.config.top_k
-                )
-                seed_entities = set(matched_dict.keys())
-            else:
-                # Use custom entity extraction
-                seed_entities = await extract_and_match_entities(
-                    query_text,
-                    self.graph,
-                    algorithm="emb",
-                    vectordb=self.vectordb,
-                    top_k=top_k or self.config.top_k,
-                    entity_extraction_func=entity_extraction_func,
-                )
-        else:
-            raise ValueError(f"Unknown algorithm: {algo}")
+        # Step 1: Extract and match entities via LLM
+        seed_entities = await extract_and_match_entities(
+            query_text,
+            self.graph,
+            algorithm=algo,
+            vectordb=self.vectordb,
+            top_k=top_k or self.config.top_k,
+            entity_extraction_func=entity_extraction_func,
+        )
 
         if not seed_entities:
             logger.warning("No entities matched from query")

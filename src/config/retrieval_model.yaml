@@ -10,13 +10,10 @@ paths:
 
 # Retriever Configuration
 retriever:
-  # Retriever selection - set 'type' to choose which retriever to use
-  type: "qwen"  # Options: qwen | bge (jina/stella: auto-download from HuggingFace)
 
   # Qwen3-Embedding Configuration
   qwen:
     model_path: "model/raw/qwen3"  # Default: use base model
-    # model_path: "model/finetuned/qwen3/fin_legal/nolabel/chunk512_384/checkpoint-150"  # Fine-tuned model
     top_k: 5
     chunk_size: 512
     overlap: 12
@@ -37,17 +34,17 @@ retriever:
     reranker_model: "model/raw/bge-reranker"
     rerank_top_k: 5
 
-  # Jina Embeddings v3 Configuration (NOT DOWNLOADED - will auto-download from HuggingFace if used)
+  # Jina Embeddings v3 Configuration
   jina:
-    model_path: "jinaai/jina-embeddings-v3"
+    model_path: "model/raw/jina-v3"
     top_k: 5
     chunk_size: 512
     overlap: 12
     trust_remote_code: true
 
-  # Stella v5 Configuration (NOT DOWNLOADED - will auto-download from HuggingFace if used)
+  # Stella v5 Configuration
   stella:
-    model_path: "NovaSearch/stella_en_1.5B_v5"  # Fixed: correct HuggingFace ID
+    model_path: "model/raw/stella-400m"
     top_k: 5
     chunk_size: 512
     overlap: 12
@@ -59,10 +56,3 @@ retriever:
     top_k: 0
     chunk_size: 0
     overlap: 0
-
-# Logging and Monitoring
-logging:
-  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "./experiments/logs/ark.log"
-  console: true

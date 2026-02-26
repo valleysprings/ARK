@@ -1,12 +1,14 @@
 #!/bin/bash
 # Train Qwen Embedding on a single dataset
-# Usage: bash train_qwen_single.sh <dataset> <stage> [output_name] [gpu]
+# Usage: bash train_qwen_single.sh <dataset> <chunk_method> <chunk_size> <overlap> [stage] [ngpu]
 #
 # Arguments:
-#   dataset: Dataset name (e.g., fin, hotpotqa, biology)
-#   stage: all | stage1 | stage2 | stage3
-#   output_name: Name for the output model (default: qwen-embedding-{dataset})
-#   gpu: GPU device ID (default: 0)
+#   dataset: Dataset name (e.g., fin, legal)
+#   chunk_method: Chunking method (e.g., sentence, token)
+#   chunk_size: Chunk size (e.g., 1, 5)
+#   overlap: Overlap size (e.g., 0, 1)
+#   stage: all | stage1 | stage2 | stage3 (default: all)
+#   ngpu: Number of GPUs (default: 8)
 
 set -e
 
@@ -16,19 +18,51 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 # Parse arguments
-DATASET=${1:-"legal"}
-STAGE=${2:-"all"}
-OUTPUT_NAME=${3:-"${DATASET}"}
-GPU=${4:-"3"}
+DATASET=${1:-"fin"}
+CHUNK_METHOD=${2:-"sentence"}
+CHUNK_SIZE=${3:-"1"}
+OVERLAP=${4:-"0"}
+STAGE=${5:-"all"}
+NGPU=${6:-8}
 
-export CUDA_VISIBLE_DEVICES=$GPU
+TRAIN_CONFIG="src/config/training.yaml"
+
+# Read training hyperparameters from config
+read MODEL_PATH BATCH_SIZE LOSS_TYPE TASK_TYPE OVERWRITE \
+    S1_EPOCHS S1_LR S1_WARMUP \
+    S2_EPOCHS S2_LR S2_WARMUP \
+    S3_EPOCHS S3_LR S3_WARMUP <<< $(python3 -c "
+import yaml
+with open('${TRAIN_CONFIG}') as f:
+    c = yaml.safe_load(f)
+cur = c['curriculum']
+print(c['model_name_or_path'], c['per_device_train_batch_size'], 
+      c['loss_type'], c['task_type'], str(c['overwrite_output_dir']).lower(),
+      cur['stage1']['epochs'], cur['stage1']['learning_rate'], cur['stage1']['warmup_steps'],
+      cur['stage2']['epochs'], cur['stage2']['learning_rate'], cur['stage2']['warmup_steps'],
+      cur['stage3']['epochs'], cur['stage3']['learning_rate'], cur['stage3']['warmup_steps'])
+")
+
+OUTPUT_NAME="${DATASET}_${CHUNK_METHOD}_${CHUNK_SIZE}_o_${OVERLAP}"
+
+export NPROC_PER_NODE=$NGPU
+
+# Set CUDA_HOME if not already set (needed by deepspeed)
+if [ -z "$CUDA_HOME" ]; then
+    if [ -d "/usr/local/cuda" ]; then
+        export CUDA_HOME=/usr/local/cuda
+    elif [ -f "${CONDA_PREFIX}/bin/nvcc" ]; then
+        export CUDA_HOME=$CONDA_PREFIX
+    fi
+fi
 
 echo "=================================================="
 echo "Training Qwen Embedding Retriever (Single Dataset)"
 echo "Dataset: $DATASET"
+echo "Chunking: ${CHUNK_METHOD}_${CHUNK_SIZE}_o_${OVERLAP}"
 echo "Stage: $STAGE"
 echo "Output Name: $OUTPUT_NAME"
-echo "GPU: $GPU"
+echo "GPUs: $NGPU"
 echo "=================================================="
 
 # Activate virtual environment if exists
@@ -37,9 +71,18 @@ if [ -d ".venv" ]; then
 fi
 
 # Training data paths
-DATASET_PATH_STAGE1="./data/training/stage1/${DATASET}_train.jsonl"
-DATASET_PATH_STAGE2="./data/training/stage2/${DATASET}_train.jsonl"
-DATASET_PATH_STAGE3="./data/training/stage3/${DATASET}_train.jsonl"
+DATA_DIR="./data/preprocessed/alignment/mistral_bge-m3/${DATASET}/${CHUNK_METHOD}/${CHUNK_METHOD}_${CHUNK_SIZE}_o_${OVERLAP}/training"
+DATASET_PATH_STAGE1="${DATA_DIR}/stage1.jsonl"
+DATASET_PATH_STAGE2="${DATA_DIR}/stage2.jsonl"
+DATASET_PATH_STAGE3="${DATA_DIR}/stage3.jsonl"
+
+# Verify data exists
+for f in "$DATASET_PATH_STAGE1" "$DATASET_PATH_STAGE2" "$DATASET_PATH_STAGE3"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: Data file not found: $f"
+        exit 1
+    fi
+done
 
 if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage1" ]; then
     echo "=================================================="
@@ -47,19 +90,18 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage1" ]; then
     echo "=================================================="
     swift sft \
         --model_type qwen3_emb \
-        --model "./model/raw/qwen3" \
+        --model "$MODEL_PATH" \
         --train_type full \
         --add_version false \
         --dataset "$DATASET_PATH_STAGE1" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}-stage1" \
-        --num_train_epochs 3 \
-        --per_device_train_batch_size 2 \
-        --gradient_accumulation_steps 16 \
-        --learning_rate 6e-6 \
-        --warmup_steps 100 \
-        --loss_type infonce \
-        --task_type embedding \
-        --overwrite_output_dir true
+        --num_train_epochs "$S1_EPOCHS" \
+        --per_device_train_batch_size "$BATCH_SIZE" \
+        --learning_rate "$S1_LR" \
+        --warmup_steps "$S1_WARMUP" \
+        --loss_type "$LOSS_TYPE" \
+        --task_type "$TASK_TYPE" \
+        --overwrite_output_dir "$OVERWRITE"
     echo "✅ Stage 1 completed!"
     echo ""
 fi
@@ -71,7 +113,7 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage2" ]; then
 
     # Determine input model path - find latest checkpoint
     if [ "$STAGE" == "stage2" ]; then
-        INPUT_MODEL="./model/raw/qwen3"
+        INPUT_MODEL="$MODEL_PATH"
     else
         # Find the latest checkpoint directory
         STAGE1_DIR="./model/checkpoints/${OUTPUT_NAME}-stage1"
@@ -88,14 +130,13 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage2" ]; then
         --add_version false \
         --dataset "$DATASET_PATH_STAGE2" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}-stage2" \
-        --num_train_epochs 4 \
-        --per_device_train_batch_size 2 \
-        --gradient_accumulation_steps 16 \
-        --learning_rate 4e-6 \
-        --warmup_steps 50 \
-        --loss_type infonce \
-        --task_type embedding \
-        --overwrite_output_dir true
+        --num_train_epochs "$S2_EPOCHS" \
+        --per_device_train_batch_size "$BATCH_SIZE" \
+        --learning_rate "$S2_LR" \
+        --warmup_steps "$S2_WARMUP" \
+        --loss_type "$LOSS_TYPE" \
+        --task_type "$TASK_TYPE" \
+        --overwrite_output_dir "$OVERWRITE"
     echo "✅ Stage 2 completed!"
     echo ""
 fi
@@ -107,7 +148,7 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage3" ]; then
 
     # Determine input model path - find latest checkpoint
     if [ "$STAGE" == "stage3" ]; then
-        INPUT_MODEL="./model/raw/qwen3"
+        INPUT_MODEL="$MODEL_PATH"
     else
         STAGE2_DIR="./model/checkpoints/${OUTPUT_NAME}-stage2"
         INPUT_MODEL=$(find "$STAGE2_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -1)
@@ -123,14 +164,13 @@ if [ "$STAGE" == "all" ] || [ "$STAGE" == "stage3" ]; then
         --add_version false \
         --dataset "$DATASET_PATH_STAGE3" \
         --output_dir "./model/checkpoints/${OUTPUT_NAME}" \
-        --num_train_epochs 3 \
-        --per_device_train_batch_size 2 \
-        --gradient_accumulation_steps 16 \
-        --learning_rate 2e-6 \
-        --warmup_steps 50 \
-        --loss_type infonce \
-        --task_type embedding \
-        --overwrite_output_dir true
+        --num_train_epochs "$S3_EPOCHS" \
+        --per_device_train_batch_size "$BATCH_SIZE" \
+        --learning_rate "$S3_LR" \
+        --warmup_steps "$S3_WARMUP" \
+        --loss_type "$LOSS_TYPE" \
+        --task_type "$TASK_TYPE" \
+        --overwrite_output_dir "$OVERWRITE"
     echo "✅ Stage 3 completed!"
     echo ""
 fi

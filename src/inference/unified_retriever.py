@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore")
 # Import different embedding models
 from FlagEmbedding import BGEM3FlagModel
 from sentence_transformers import SentenceTransformer
-import requests
 
 # Import prompts
 from src.inference.prompts import DATASET2PROMPT, ULTRADOMAIN_PROMPT
@@ -80,8 +79,8 @@ class UnifiedRetriever:
         self.device = torch.device(device) if torch.cuda.is_available() else torch.device("cpu")
 
         # Get retriever config
-        retriever_config = config.get("inference", {}).get("retriever", {})
-        self.model_type = retriever_config.get("type", "qwen")
+        retriever_config = config["inference"]["retriever"]
+        self.model_type = retriever_config["type"]
 
         if self.model_type not in self.SUPPORTED_MODELS:
             raise ValueError(f"Unsupported model type: {self.model_type}. "
@@ -98,49 +97,58 @@ class UnifiedRetriever:
     def _load_model(self):
         """Load the appropriate model based on config"""
         retriever_config = self.config["inference"]["retriever"]
-        model_config = retriever_config.get(self.model_type, {})
+        model_config = retriever_config[self.model_type]
 
         if self.model_type == "qwen":
-            model_path = model_config.get("model_path", "Qwen/Qwen3-Embedding-0.6B")
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
             self.model = SentenceTransformer(
-                model_path,
+                model_config["model_path"],
                 device=str(self.device),
-                model_kwargs={"torch_dtype": "bfloat16"}
+                model_kwargs={"dtype": "bfloat16"}
             )
-            self.top_k = model_config.get("top_k", 5)
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            self.top_k = model_config["top_k"]
 
         elif self.model_type == "bge":
-            model_path = model_config.get("model_path", "model/raw/bge-m3")
             self.model = BGEM3FlagModel(
-                model_path,
+                model_config["model_path"],
                 use_fp16=True,
                 device=str(self.device)
             )
-            self.top_k = model_config.get("top_k", 10)
-            self.use_reranker = model_config.get("use_reranker", False)
-            self.dense_weight = model_config.get("dense_weight", 1.0)
-            self.sparse_weight = model_config.get("sparse_weight", 0.3)
-            self.colbert_weight = model_config.get("colbert_weight", 1.0)
+            self.top_k = model_config["top_k"]
+            self.use_reranker = model_config["use_reranker"]
+            self.dense_weight = model_config["dense_weight"]
+            self.sparse_weight = model_config["sparse_weight"]
+            self.colbert_weight = model_config["colbert_weight"]
 
         elif self.model_type == "jina":
-            model_path = model_config.get("model_path", "jinaai/jina-embeddings-v3")
-            trust_remote_code = model_config.get("trust_remote_code", True)
+            # Use offline mode to avoid network requests when loading local model
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
             self.model = SentenceTransformer(
-                model_path,
+                model_config["model_path"],
                 device=str(self.device),
-                trust_remote_code=trust_remote_code,
-                model_kwargs={"torch_dtype": torch.bfloat16}
+                trust_remote_code=model_config["trust_remote_code"],
+                model_kwargs={"dtype": torch.bfloat16}
             )
-            self.top_k = model_config.get("top_k", 5)
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            self.top_k = model_config["top_k"]
 
         elif self.model_type == "stella":
-            model_path = model_config.get("model_path", "NovaSearch/stella_en_1.5B_v5")
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
             self.model = SentenceTransformer(
-                model_path,
+                model_config["model_path"],
                 device=str(self.device),
-                model_kwargs={"torch_dtype": torch.bfloat16}
+                trust_remote_code=True,
+                model_kwargs={"dtype": torch.bfloat16, "attn_implementation": "eager"}
             )
-            self.top_k = model_config.get("top_k", 5)
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            self.top_k = model_config["top_k"]
 
         print(f"Model loaded: {self.model_type} (top_k={self.top_k})")
 
@@ -169,8 +177,8 @@ class UnifiedRetriever:
 
     def _retrieve_qwen(self, query: str, chunks: List[str]) -> List[Tuple[int, float]]:
         """Qwen3-Embedding retrieval"""
-        query_emb = self.model.encode(query, prompt_name="query")
-        chunk_embs = self.model.encode(chunks)
+        query_emb = self.model.encode(query, prompt_name="query", show_progress_bar=False)
+        chunk_embs = self.model.encode(chunks, show_progress_bar=False)
 
         similarities = self.model.similarity(query_emb, chunk_embs)[0]
 
@@ -302,40 +310,51 @@ def text_to_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
     return chunks
 
 
-def llm_generate(prompt: str, endpoint: str = "http://localhost:11434",
-                model: str = "mistral:latest", num_ctx: int = 16384) -> str:
-    """
-    Generate answer using Ollama LLM
+class VLLMGenerator:
+    """vLLM offline inference (direct Python API, no HTTP server)"""
 
-    Args:
-        prompt: Full prompt including context and question
-        endpoint: Ollama endpoint
-        model: Model name
-        num_ctx: Context window size (default: 16384)
-
-    Returns:
-        Generated answer
-    """
-    try:
-        response = requests.post(
-            f"{endpoint}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 0.9,
-                    "num_ctx": num_ctx  # Explicitly set context window
-                }
-            },
-            timeout=60
+    def __init__(self, model_path, device, max_tokens, max_model_len,
+                 temperature, top_p):
+        from vllm import LLM, SamplingParams
+        gpu_id = device.split(":")[-1] if ":" in device else "1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        print(f"Loading vLLM: {model_path} on GPU {gpu_id}...")
+        self.llm = LLM(
+            model=model_path,
+            trust_remote_code=True,
+            max_model_len=max_model_len,
+            disable_log_stats=True,
         )
-        response.raise_for_status()
-        return response.json()["response"].strip()
-    except Exception as e:
-        print(f"LLM generation error: {e}")
-        return ""
+        self.sampling_params = SamplingParams(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        print(f"vLLM ready: {model_path}")
+
+    def generate(self, prompt: str) -> str:
+        try:
+            outputs = self.llm.generate([prompt], self.sampling_params)
+            return outputs[0].outputs[0].text.strip()
+        except Exception as e:
+            print(f"LLM generation error: {e}")
+            return ""
+
+    def shutdown(self):
+        if hasattr(self, 'llm') and self.llm is not None:
+            del self.llm
+            self.llm = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("vLLM released")
+
+
+def llm_generate(prompt: str, generator: "VLLMGenerator" = None, **kwargs) -> str:
+    """Generate answer using vLLM"""
+    if generator is None:
+        raise RuntimeError("VLLMGenerator not initialized")
+    return generator.generate(prompt)
 
 
 # Convenience function to load retriever from config file

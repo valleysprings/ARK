@@ -30,3 +30,15 @@ Output:
 Text: {input_text}
 Output:
 """
+
+PROMPTS[
+    "query_entity_extraction"
+] = """Extract all key entities (named entities, concepts, technical terms) from the following query. Return ONLY a JSON list of entity name strings, nothing else.
+
+Example:
+Query: What is the primary purpose of the Restructuring Support Agreement between Endologix and the Supporting Lenders?
+Output: ["RESTRUCTURING SUPPORT AGREEMENT", "ENDOLOGIX", "SUPPORTING LENDERS"]
+
+Query: {input_text}
+Output:
+"""

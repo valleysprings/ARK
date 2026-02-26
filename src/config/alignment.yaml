@@ -1,31 +1,68 @@
-# Alignment Scoring Configuration
-# Configuration for triple alignment scoring in Answer-Centric Retrieval
+# Alignment & Data Pipeline Configuration
+# Covers: scoring, chunking, PPR, query generation, training data generation
 
-# Knowledge Graph Configuration
-kg:
-  # Text processing
-  chunk_size: 512
-  chunk_overlap: 12
+# Scoring weights
+forward_weight: 1.0    # P(answer|chunk, question)
+backward_weight: 0.3   # P(question|chunk, answer)
+parameter_weight: 1.0  # cosine(query_emb, chunk_emb)
+normalize_scores: true
 
-# Training Configuration
-training:
-  # Common settings
-  common:
-    device: "cuda"  # Device for model inference: cuda | cpu
-    seed: 42
+# Chunking
+# chunk_method: "token"  # "token" or "sentence"
+# chunk_size: 512
+# chunk_overlap: 12
 
-  # Qwen Embedding Training
-  qwen:
-    # Triple alignment scoring
-    alignment:
-      forward_weight: 1.0    # P(answer|chunk, question)
-      backward_weight: 0.3   # P(question|chunk, answer)
-      parameter_weight: 1.0  # cosine(query_emb, chunk_emb)
-      batch_size: 64  # Batch size for embedding computation
-      normalize_scores: true  # Whether to normalize individual alignment scores
-      top_m: 10  # Number of positive chunks to select
+# chunk_method: "token"  # "token" or "sentence"
+# chunk_size: 64
+# chunk_overlap: 8
 
-# Logging
-logging:
-  level: "INFO"
-  console: true
+# chunk_method: "sentence"  # "token" or "sentence"
+# chunk_size: 5
+# chunk_overlap: 1
+
+chunk_method: "sentence"  # "token" or "sentence"
+chunk_size: 1
+chunk_overlap: 0
+
+# Retrieval
+top_k: 10  # Number of top chunks to keep per sample
+
+# Short-phrase penalty
+min_chunk_tokens: 10
+
+# Embedding
+batch_size: 64
+
+# vLLM
+gpu_memory_utilization: 0.85
+vllm_max_model_len: 8192
+
+# Personalized PageRank (for subgraph extraction)
+ppr:
+  alpha: 0.85
+  epsilon: 1e-4
+  max_iterations: 100
+  adaptive_cutoff: true
+  large:
+    min_k: 20
+    max_k: 50
+  small:
+    min_k: 3
+    max_k: 10
+
+# Query Generation (for negative mining)
+query_generation:
+  num_queries: 10
+  max_workers: 10
+
+# Training Data Generation (per-stage defaults, overridable via CLI)
+training_data:
+  stage1:
+    num_positives: 10
+    num_negatives: 20
+  stage2:
+    num_positives: 10
+    num_negatives: 20
+  stage3:
+    num_positives: 10
+    num_negatives: 20

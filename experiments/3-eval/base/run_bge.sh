@@ -1,49 +1,34 @@
 #!/bin/bash
-# BGE-M3 Base Model Evaluation
-# Usage: bash run_bge.sh [dataset] [limit]
+# BGE-M3 Base Model Evaluation (All Datasets)
+# Usage: bash run_bge.sh [samples]
 
 set -e
 
-# Get the project root directory (3 levels up from this script)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-
-# Change to project root
 cd "${PROJECT_ROOT}"
 
-DATASET=${1:-"hotpotqa"}
-LIMIT=${2:-100}
+SAMPLES=${1:-100}
 
-# Log setup
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_DIR="${PROJECT_ROOT}/log/eval"
 mkdir -p "${LOG_DIR}"
-LOG_FILE="${LOG_DIR}/bge_${DATASET}_${LIMIT}_${TIMESTAMP}.log"
-
-exec > >(tee -a "${LOG_FILE}") 2>&1
-echo "Log file: ${LOG_FILE}"
-
-DATA_PATH="data/raw/${DATASET}.jsonl"
-LLM_CONFIG="src/config/llm_inference.yaml"
-RETRIEVAL_CONFIG="src/config/retrieval_model.yaml"
-DEVICE="cuda:0"
+LOG_FILE="${LOG_DIR}/bge_all_${SAMPLES}_${TIMESTAMP}.log"
 
 echo "=================================================="
-echo "ARK Evaluation - BGE-M3 (Base)"
-echo "=================================================="
-echo "Dataset: ${DATASET}"
-echo "Limit: ${LIMIT} samples"
+echo "ARK Evaluation - BGE-M3 (Base) - All Datasets"
+echo "Samples: ${SAMPLES} samples per dataset"
+echo "Log: ${LOG_FILE}"
 echo "=================================================="
 
 PYTHONPATH="${PROJECT_ROOT}" python src/inference/run_inference.py \
-    --dataset "${DATA_PATH}" \
+    --dataset "data/raw" \
     --retriever bge \
-    --llm-config "${LLM_CONFIG}" \
-    --retrieval-config "${RETRIEVAL_CONFIG}" \
-    --device "${DEVICE}" \
-    --limit "${LIMIT}"
+    --llm-config "src/config/llm.yaml" \
+    --retrieval-config "src/config/retrieval_model.yaml" \
+    --device "cuda:0" \
+    --llm-device "cuda:1" \
+    --limit "${SAMPLES}" \
+    2>&1 | tee -a "${LOG_FILE}"
 
-echo ""
-echo "✅ BGE evaluation completed!"
-echo "Results saved to: results/raw/limit_${LIMIT}/${DATASET}/bge.jsonl"
-echo "Scores saved to: results/score/limit_${LIMIT}/${DATASET}/bge.json"
+echo "✅ BGE all datasets evaluation completed!"

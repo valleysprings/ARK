@@ -1,0 +1,16 @@
+# Knowledge Graph Configuration
+
+kg:
+  # Text processing (for KG construction)
+  chunk_size: 512
+  chunk_overlap: 12
+
+  # Graph construction
+  graph:
+    similarity_threshold: 0.8
+    enable_augmentation: true
+    embedding_batch_size: 128
+    max_entities: 10000
+
+# Working directory for augmentation
+cache_root: "./data/preprocessed"

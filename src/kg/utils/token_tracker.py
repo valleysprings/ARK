@@ -10,10 +10,24 @@ import warnings
 import os
 import sys
 import contextlib
+import contextvars
 from typing import List, Dict, Any, Union, Optional
 from decimal import Decimal
 from datetime import datetime
 from io import StringIO
+
+# Per-document context variable for concurrent tracking
+_current_doc_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('current_doc_id', default=None)
+
+
+def set_current_doc_id(doc_id: str):
+    """Set the current document ID for per-doc token tracking (asyncio-safe)."""
+    _current_doc_id.set(doc_id)
+
+
+def get_current_doc_id() -> Optional[str]:
+    """Get the current document ID."""
+    return _current_doc_id.get()
 
 # Comprehensive warning suppression for tiktoken model update messages
 # Must be done BEFORE importing tokencost/tiktoken
@@ -502,6 +516,7 @@ class SimpleTokenTracker:
         self.total_output_tokens = 0
         self.total_tokens = 0
         self.call_details = []
+        self.per_doc_stats: Dict[str, Dict[str, int]] = {}
 
     def add_call(self, input_tokens: int, output_tokens: int, model: str = "unknown", operation: str = ""):
         """
@@ -525,6 +540,22 @@ class SimpleTokenTracker:
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens
         })
+
+        # Track per-document stats via contextvars (asyncio-safe)
+        doc_id = _current_doc_id.get()
+        if doc_id is not None:
+            if doc_id not in self.per_doc_stats:
+                self.per_doc_stats[doc_id] = {
+                    "total_calls": 0,
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "total_tokens": 0,
+                }
+            s = self.per_doc_stats[doc_id]
+            s["total_calls"] += 1
+            s["total_input_tokens"] += input_tokens
+            s["total_output_tokens"] += output_tokens
+            s["total_tokens"] += (input_tokens + output_tokens)
 
     def print_summary(self):
         """Print a summary of total token usage"""
@@ -552,6 +583,27 @@ class SimpleTokenTracker:
             print(f"  Total Tokens:  {detail['total_tokens']:,}")
             print("-" * 80)
         print("="*80 + "\n")
+
+    def get_doc_stats(self, doc_id: str) -> Dict[str, int]:
+        """Get per-document token stats tracked via contextvars."""
+        return self.per_doc_stats.get(doc_id, {
+            "total_calls": 0, "total_input_tokens": 0,
+            "total_output_tokens": 0, "total_tokens": 0,
+        })
+
+    def snapshot(self) -> Dict[str, int]:
+        """Return a snapshot of current totals for computing deltas"""
+        return {
+            "total_calls": self.total_calls,
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    @staticmethod
+    def delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, int]:
+        """Compute the difference between two snapshots"""
+        return {k: after[k] - before[k] for k in before}
 
     def reset(self):
         """Reset all counters and details"""

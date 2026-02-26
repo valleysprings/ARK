@@ -5,6 +5,10 @@ Provides functions for text encoding, chunking, and document processing.
 Uses tiktoken for efficient token-level operations.
 """
 
+import os
+os.environ.setdefault("TIKTOKEN_CACHE_DIR", os.path.expanduser("~/.cache/tiktoken_cache"))
+
+import re
 import tiktoken
 from typing import List, Dict, TypedDict
 from hashlib import md5
@@ -16,7 +20,7 @@ from hashlib import md5
 
 TextChunkSchema = TypedDict(
     "TextChunkSchema",
-    {"tokens": int, "content": str, "full_doc_id": str, "chunk_order_index": int},
+    {"tokens": int, "content": str, "chunk_order_index": int},
 )
 
 
@@ -107,9 +111,91 @@ def decode_tokens_by_tiktoken(tokens: List[int], model_name: str = "gpt-4o") -> 
 # Text Chunking
 # ============================================================================
 
+def _split_long_sentence(text: str, max_tokens: int = 256, min_tokens: int = 30) -> List[str]:
+    global ENCODER
+
+    tok_cache = {}
+    def tok_len(s: str) -> int:
+        v = tok_cache.get(s)
+        if v is None:
+            v = len(ENCODER.encode(s))
+            tok_cache[s] = v
+        return v
+
+    if tok_len(text) <= max_tokens:
+        return [text]
+
+    parts = re.split(r'(\n\s*-{10,}\s*\n|\n\n+)', text)
+
+    segs: List[str] = []
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        if i + 1 < len(parts):
+            seg += parts[i + 1]
+        if seg != "":
+            segs.append(seg)
+
+    out: List[str] = []
+    cur = ""
+    cur_tok = 0
+
+    for seg in segs:
+        st = tok_len(seg)
+        if cur and cur_tok + st > max_tokens:
+            if out and cur_tok < min_tokens and tok_len(out[-1]) + cur_tok <= max_tokens:
+                out[-1] += cur
+            else:
+                out.append(cur)
+            cur, cur_tok = seg, st
+            continue
+
+        cur += seg
+        cur_tok += st
+
+    if cur:
+        if out and cur_tok < min_tokens and tok_len(out[-1]) + cur_tok <= max_tokens:
+            out[-1] += cur
+        else:
+            out.append(cur)
+
+    return out if out else [text]
+
+
+def chunking_by_sentence(
+    text: str,
+    max_sentences: int = 5,
+    overlap_sentences: int = 1,
+    max_token_per_sentence: int = 256,
+) -> List[TextChunkSchema]:
+    """Chunk text by sentence count with overlap.
+
+    Uses nltk sent_tokenize, then further splits any sentence exceeding
+    max_token_per_sentence on paragraph/section boundaries and semicolons
+    before enumeration markers (common in legal text).
+    """
+    from nltk.tokenize import sent_tokenize
+    global ENCODER
+
+    raw_sentences = sent_tokenize(text)
+    sentences = []
+    for s in raw_sentences:
+        sentences.extend(_split_long_sentence(s, max_token_per_sentence))
+
+    chunks = []
+    step = max(max_sentences - overlap_sentences, 1)
+    for i in range(0, len(sentences), step):
+        group = sentences[i:i + max_sentences]
+        content = ' '.join(group)
+        chunks.append({
+            "tokens": len(ENCODER.encode(content)),
+            "content": content,
+            "chunk_order_index": len(chunks),
+        })
+    return chunks
+
+
 def chunking_by_token_size(
     tokens_list: List[List[int]],
-    doc_keys: List[str],
     tiktoken_model: tiktoken.Encoding,
     overlap_token_size: int = 128,
     max_token_size: int = 1024,
@@ -117,13 +203,8 @@ def chunking_by_token_size(
     """
     Chunk documents by token size with overlap
 
-    Splits tokenized documents into fixed-size chunks with overlap to maintain
-    context across chunk boundaries. Essential for processing long documents
-    with LLMs that have token limits.
-
     Args:
         tokens_list: List of tokenized documents (each doc is a list of token IDs)
-        doc_keys: List of document identifiers corresponding to tokens_list
         tiktoken_model: Tiktoken encoding model for decoding
         overlap_token_size: Number of tokens to overlap between chunks (default: 128)
         max_token_size: Maximum tokens per chunk (default: 1024)
@@ -133,13 +214,12 @@ def chunking_by_token_size(
             - tokens: Number of tokens in chunk
             - content: Decoded text content
             - chunk_order_index: Position in document
-            - full_doc_id: Source document ID
 
     Example:
         >>> encoder = tiktoken.encoding_for_model("gpt-4o")
         >>> doc_tokens = [encoder.encode("Your long document text...")]
         >>> chunks = chunking_by_token_size(
-        ...     doc_tokens, ["doc-1"], encoder, overlap_token_size=100, max_token_size=500
+        ...     doc_tokens, encoder, overlap_token_size=100, max_token_size=500
         ... )
     """
     results = []
@@ -163,7 +243,6 @@ def chunking_by_token_size(
                     "tokens": lengths[i],
                     "content": chunk.strip(),
                     "chunk_order_index": i,
-                    "full_doc_id": doc_keys[index],
                 }
             )
 
@@ -205,15 +284,13 @@ def get_chunks(
     # Extract documents and keys
     new_docs_list = list(new_docs.items())
     docs = [new_doc[1]["content"] for new_doc in new_docs_list]
-    doc_keys = [new_doc[0] for new_doc in new_docs_list]
-
     # Encode documents in batch (more efficient than one-by-one)
     ENCODER = tiktoken.encoding_for_model("gpt-4o")
     tokens = ENCODER.encode_batch(docs, num_threads=16)
 
     # Apply chunking function
     chunks = chunk_func(
-        tokens, doc_keys=doc_keys, tiktoken_model=ENCODER, **chunk_func_params
+        tokens, tiktoken_model=ENCODER, **chunk_func_params
     )
 
     # Create hash IDs for chunks

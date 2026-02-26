@@ -52,10 +52,10 @@ def load_llm_config(config_path: str = None) -> Dict[str, Any]:
     """
     Load LLM API configuration from YAML file and .env
 
-    Loads configuration from llm_api.yaml and merges with credentials from .env file
+    Loads configuration from llm.yaml and merges with credentials from .env file
 
     Args:
-        config_path: Path to config file. Defaults to src/config/llm_api.yaml
+        config_path: Path to config file. Defaults to src/config/llm.yaml
 
     Returns:
         Dictionary with LLM API configuration merged with credentials from .env
@@ -71,9 +71,9 @@ def load_llm_config(config_path: str = None) -> Dict[str, Any]:
             print("Please copy .env.example to .env and fill in your API keys")
 
     if config_path is None:
-        # Default to llm_api.yaml in src/config/
+        # Default to llm.yaml in src/config/
         # From kg/utils/llm_client.py, go up 2 levels to src/, then to config/
-        config_path = Path(__file__).parent.parent.parent / "config" / "llm_api.yaml"
+        config_path = Path(__file__).parent.parent.parent / "config" / "llm.yaml"
 
     # Load main configuration
     with open(config_path, 'r') as f:
@@ -96,6 +96,10 @@ def load_llm_config(config_path: str = None) -> Dict[str, Any]:
     if 'ollama' in llm_config:
         llm_config['ollama']['base_url'] = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
 
+    if 'vllm' in llm_config:
+        llm_config['vllm']['base_url'] = os.getenv('VLLM_BASE_URL', llm_config['vllm'].get('base_url', 'http://localhost:8000/v1'))
+        llm_config['vllm']['model'] = os.getenv('VLLM_MODEL', llm_config['vllm'].get('model', ''))
+
     return llm_config
 
 
@@ -106,54 +110,52 @@ _LLM_CONFIG = load_llm_config()
 DEEPSEEK_CONFIG = _LLM_CONFIG.get('deepseek', {})
 DEEPSEEK_API_KEY = DEEPSEEK_CONFIG.get('api_key', '')
 DEEPSEEK_BASE_URL = DEEPSEEK_CONFIG.get('base_url', 'https://api.deepseek.com')
-DEEPSEEK_MODEL = DEEPSEEK_CONFIG.get('model', 'deepseek-chat')
+DEEPSEEK_MODEL = DEEPSEEK_CONFIG['model'] if DEEPSEEK_CONFIG else 'deepseek-chat'
 
 GPT_CONFIG = _LLM_CONFIG.get('gpt', {})
 GPT_API_KEY = GPT_CONFIG.get('api_key', '')
 GPT_BASE_URL = GPT_CONFIG.get('base_url', 'https://new.gptgod.cloud/v1/')
-GPT_MODEL = GPT_CONFIG.get('model', 'gemini-2.5-flash')
+GPT_MODEL = GPT_CONFIG['model'] if GPT_CONFIG else 'gemini-2.5-flash'
 
 GEMINI_CONFIG = _LLM_CONFIG.get('gemini', {})
 GOOGLE_API_KEY = GEMINI_CONFIG.get('api_key', '')
-GOOGLE_MODEL = GEMINI_CONFIG.get('model', 'gemini-2.5-flash')
+GOOGLE_MODEL = GEMINI_CONFIG['model'] if GEMINI_CONFIG else 'gemini-2.5-flash'
 
 OLLAMA_CONFIG = _LLM_CONFIG.get('ollama', {})
 OLLAMA_BASE_URL = OLLAMA_CONFIG.get('base_url', 'http://localhost:11434')
-OLLAMA_MODEL = OLLAMA_CONFIG.get('model', 'mistral:latest')
+OLLAMA_MODEL = OLLAMA_CONFIG['model'] if OLLAMA_CONFIG else 'mistral:latest'
+
+VLLM_CONFIG = _LLM_CONFIG.get('vllm', {})
+VLLM_BASE_URL = VLLM_CONFIG.get('base_url', 'http://localhost:8000/v1')
+VLLM_MODEL = VLLM_CONFIG.get('model', '')
+VLLM_TIMEOUT = float(VLLM_CONFIG['timeout'] if VLLM_CONFIG else 600)
+VLLM_MAX_RETRIES = int(VLLM_CONFIG['max_retries'] if VLLM_CONFIG else 3)
 
 # General settings
 SETTINGS = _LLM_CONFIG.get('settings', {})
-TIMEOUT = float(DEEPSEEK_CONFIG.get('timeout', SETTINGS.get('timeout', 1200)))
-MAX_ASYNC_CALL_SIZE = SETTINGS.get('max_async_calls', 10)
-MAX_RETRIES = DEEPSEEK_CONFIG.get('max_retries', 2)
-RETRY_DELAY = SETTINGS.get('retry_delay', 10)
+TIMEOUT = float(DEEPSEEK_CONFIG['timeout'] if DEEPSEEK_CONFIG else SETTINGS['max_async_calls'])
+MAX_ASYNC_CALL_SIZE = SETTINGS['max_async_calls']
+MAX_RETRIES = DEEPSEEK_CONFIG['max_retries'] if DEEPSEEK_CONFIG else 2
+RETRY_DELAY = SETTINGS['retry_delay']
 
 
 # ============================================================================
 # Utility Decorators
 # ============================================================================
 
-def limit_async_func_call(max_size: int, waiting_time: float = 0.0001):
+def limit_async_func_call(max_size: int = None, waiting_time: float = 0.0001):
     """
-    Decorator to limit the number of concurrent async function calls
-
-    This prevents overwhelming the API with too many simultaneous requests.
-
-    Args:
-        max_size: Maximum number of concurrent calls allowed
-        waiting_time: Time to wait between checks (in seconds)
-
-    Returns:
-        Decorated async function with concurrency limiting
+    Decorator to limit the number of concurrent async function calls.
+    If max_size is None, reads MAX_ASYNC_CALL_SIZE at runtime (supports dynamic override).
     """
     def decorator(func):
-        """Not using asyncio.Semaphore to avoid nest-asyncio issues"""
         __current_size = 0
 
         @functools.wraps(func)
         async def wait_func(*args, **kwargs):
             nonlocal __current_size
-            while __current_size >= max_size:
+            _max = max_size if max_size is not None else MAX_ASYNC_CALL_SIZE
+            while __current_size >= _max:
                 await asyncio.sleep(waiting_time)
             __current_size += 1
             try:
@@ -388,7 +390,7 @@ class LLMClientManager:
 
         return result
 
-    @limit_async_func_call(max_size=MAX_ASYNC_CALL_SIZE, waiting_time=0.01)
+    @limit_async_func_call(waiting_time=0.01)
     @retry_with_timeout()
     async def call_google(
         self,
@@ -430,6 +432,64 @@ class LLMClientManager:
 
         # Track with cost tracker (if tokencost available)
         self._track_call("google", operation_name, prompt, result)
+
+        return result
+
+    @limit_async_func_call(waiting_time=0.01)
+    @retry_with_timeout(timeout=VLLM_TIMEOUT, max_retries=VLLM_MAX_RETRIES)
+    async def call_vllm(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history_messages: List = None,
+        operation_name: str = "vllm_call",
+        **kwargs
+    ) -> str:
+        """
+        Call local vLLM server (OpenAI-compatible API)
+        """
+        if history_messages is None:
+            history_messages = []
+
+        vllm_client = AsyncOpenAI(
+            api_key="EMPTY",
+            base_url=VLLM_BASE_URL,
+            timeout=VLLM_TIMEOUT,
+            max_retries=VLLM_MAX_RETRIES
+        )
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": prompt})
+
+        # Disable thinking for Thinking models to avoid wasting tokens
+        extra_body = kwargs.pop("extra_body", {})
+        if "thinking" not in VLLM_MODEL.lower():
+            pass  # non-thinking model, no need
+        else:
+            extra_body.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+
+        response = await vllm_client.chat.completions.create(
+            model=VLLM_MODEL,
+            messages=messages,
+            max_tokens=kwargs.pop("max_tokens", 4096),
+            extra_body=extra_body if extra_body else None,
+            **kwargs
+        )
+
+        result = response.choices[0].message.content
+
+        if hasattr(response, 'usage') and response.usage:
+            input_tokens = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            total_tokens = input_tokens + output_tokens
+
+            tracker = get_simple_tracker()
+            tracker.add_call(input_tokens, output_tokens, VLLM_MODEL, operation_name)
+
+            print(f"[Token Usage] Input: {input_tokens:,}, Output: {output_tokens:,}, Total: {total_tokens:,}", flush=True)
 
         return result
 
@@ -536,6 +596,29 @@ async def google_model(prompt: str, **kwargs) -> str:
         Model response
     """
     return await _global_llm_client.call_google(prompt, **kwargs)
+
+
+async def vllm_model(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    history_messages: List = None,
+    **kwargs
+) -> str:
+    """
+    Convenience function for local vLLM server calls
+
+    Args:
+        prompt: User prompt
+        system_prompt: Optional system prompt
+        history_messages: Optional conversation history
+        **kwargs: Additional arguments
+
+    Returns:
+        Model response
+    """
+    return await _global_llm_client.call_vllm(
+        prompt, system_prompt, history_messages, **kwargs
+    )
 
 
 def get_llm_session_summary() -> dict:

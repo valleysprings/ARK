@@ -1,20 +1,34 @@
-# ARK: Answer-centric Retriever via KG-driven Curriculum Learning
+# ARK: Answer-Centric Retriever Tuning via  KG-augmented Curriculum Learning
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![arXiv](https://img.shields.io/badge/arXiv-2511.16326-b31b1b.svg)](https://arxiv.org/abs/2511.16326)
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10-blue.svg" alt="Python 3.10"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
+  <a href="https://arxiv.org/abs/2511.16326"><img src="https://img.shields.io/badge/arXiv-2511.16326-b31b1b.svg" alt="arXiv"></a>
+</p>
 
-**Authors**: Jiawei Zhou*, Hang Ding*, Haiyun Jiang (*Equal Contribution)
+<p align="center">
+  <img src="asset/Framework.png" width="80%" />
+  <br>
+  <em>Figure 1: Overview of the ARK framework.</em>
+</p>
 
 ## Overview
 
 **Query Construction & Contrastive Finetuning**: ARK constructs a knowledge graph from documents, extracts query-based subgraphs, and generates augmented queries to mine hard negative chunks for contrastive learning.
 
-![ARK Framework](asset/Framework.png)
+<p align="center">
+  <img src="asset/Query.png" width="80%" />
+  <br>
+  <em>Figure 2: Query augmentation via KG-driven subgraph extraction.</em>
+</p>
 
 **Answer-Centric Alignment & Curriculum Learning**: We rank chunks by forward/backward alignment scores (whether a chunk helps generate the correct answer), then progressively train the retriever from easy to hard negatives across three curriculum stages.
 
-![ARK Training Pipeline](asset/FT.png)
+<p align="center">
+  <img src="asset/FT.png" width="80%" />
+  <br>
+  <em>Figure 3: Answer-centric alignment and curriculum-based contrastive learning.</em>
+</p>
 
 ## Quick Start
 
@@ -26,34 +40,42 @@ cp .env.example .env  # Setup API keys
 ## Pipeline
 
 ```bash
+# 1. Knowledge Graph Construction
+bash experiments/1-kg/generate_kg_{vllm,openai}.sh
+bash experiments/1-kg/augment_kg.sh
+bash experiments/1-kg/generate_comm.sh
 
-# 1. Knowledge Graph
-bash experiments/1-kg/generate_kg.sh <dataset> <start> <end> <gpu>
-
-# 2. Generate Training Sample
-bash experiments/2-training/generate_pos.sh <dataset> <start> <end>
-bash experiments/2-training/generate_neg.sh <dataset> <start> <end> <stage> <gpu>
+# 2. Training Data Generation
+bash experiments/2-training/generate_pos.sh
+bash experiments/2-training/generate_query.sh
+bash experiments/2-training/generate_neg.sh
+bash experiments/2-training/generate_training.sh
 
 # 3. Train
-bash experiments/2-training/train_qwen_single.sh <dataset> <stage> [output] [gpu]
-bash experiments/2-training/train_qwen_multi.sh <datasets> <stage> [output] [gpu]
+bash experiments/2-training/train_qwen_{single,multi}.sh
 
 # 4. Evaluate
-bash experiments/3-eval/finetuned/run_qwen.sh <eval_data> <train_data> <start> <end> <gpu>
+bash experiments/3-eval/base/*.sh
+bash experiments/3-eval/finetuned/run_qwen.sh
+
+# 5. Stats
+bash experiments/4-stats/kg.sh
+bash experiments/4-stats/coverage.sh
 ```
 
 ## Config
 
 Configuration files in `src/config/`:
-- `training.yaml` - Training params (num_positives, num_negatives, retrieval_top_k)
-- `alignment.yaml` - Alignment score computation
-- `graph_builder.yaml` - Knowledge graph construction
-- `query_generation.yaml` - Synthetic query generation
-- `llm_api.yaml` - LLM API settings
-- `llm_inference.yaml` - Inference settings
+- `alignment.yaml` - Alignment score computation, subgraph extraction, query_generation, training samples
+- `kg.yaml` - Knowledge graph construction
+- `llm.yaml` - LLM API and inference settings
 - `retrieval_model.yaml` - Retrieval model settings
+- `training.yaml` - Training params
 
 ## Results
+
+All experiments use Mistral-7B v0.2 as the reader and Qwen3-Embedding-0.6B as the default ARK retriever. 
+For fair comparison, all methods retrieve Top-5 chunks (chunk size = 512, overlap = 12).
 
 **LongBench (F1 Score):**
 

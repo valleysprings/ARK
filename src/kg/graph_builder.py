@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 import logging
 import asyncio
+import os
 
 from src.kg.core.nx_graph import nx_graph
 from src.kg.ops.construction import KGBuilder
@@ -109,16 +110,24 @@ class KnowledgeGraph:
         threshold: Optional[float] = None,
         force_recompute_embeddings: bool = False,
         dataset_name: str = None,
-        entry_id: str = None
+        entry_id: str = None,
+        embedding_provider: str = None,
+        embedding_model_path: str = None,
     ) -> int:
         # Set dataset_name and entry_id in config
         if dataset_name:
             self.config['dataset_name'] = dataset_name
         if entry_id:
             self.config['entry_id'] = entry_id
+        # Ensure cache_root includes model_name layer (parent of working_dir)
+        self.config.setdefault('paths', {})['cache_root'] = str(Path(self.working_dir).parent)
 
         if self._augmentor is None:
-            self._augmentor = GraphAugmentor(config=self.config)
+            self._augmentor = GraphAugmentor(
+                config=self.config,
+                embedding_provider=embedding_provider,
+                embedding_model_path=embedding_model_path,
+            )
 
         if not hasattr(self, '_entities_data'):
             raise ValueError("No entities data available. Please build the graph first.")
@@ -276,6 +285,8 @@ async def process_document(
     similarity_threshold: float = 0.8,
     skip_build: bool = False,
     skip_augment: bool = False,
+    embedding_provider: str = None,
+    embedding_model_path: str = None,
 ) -> None:
     """
     Process a single document through the complete KG pipeline
@@ -294,8 +305,11 @@ async def process_document(
     """
     import pickle
     from src.kg.utils.file_operations import read_source_document
+    from src.kg.utils.token_tracker import get_simple_tracker, set_current_doc_id
 
     doc_id = f"{dataset_type}_{doc_index}"
+    set_current_doc_id(doc_id)
+    tracker = get_simple_tracker()
 
     logger.info(f"\n{'='*70}")
     logger.info(f"Processing document {doc_index}: {doc_id}")
@@ -352,6 +366,16 @@ async def process_document(
     if not skip_augment:
         logger.info("\n[Step 2/3] Augmenting Knowledge Graph...")
 
+        # If build was skipped, load base KG first
+        if skip_build:
+            kg_path = output_dir / "full_kg" / f"{doc_id}.pkl"
+            if kg_path.exists():
+                logger.info(f"Loading base KG from {kg_path}")
+                kg.load(str(kg_path))
+            else:
+                logger.warning(f"Base KG not found at {kg_path}, skipping augmentation")
+                return
+
         # Check if already augmented
         aug_kg_path = output_dir / "full_kg_augmented" / f"{doc_id}.pkl"
         if aug_kg_path.exists():
@@ -382,7 +406,9 @@ async def process_document(
             edges_added = await kg.augment(
                 threshold=similarity_threshold,
                 dataset_name=dataset_type,
-                entry_id=doc_id
+                entry_id=doc_id,
+                embedding_provider=embedding_provider,
+                embedding_model_path=embedding_model_path,
             )
 
             # Save augmented KG
@@ -393,9 +419,40 @@ async def process_document(
             logger.info(f"✓ Saved to {aug_kg_path}")
 
     # ========================================================================
+    doc_tokens = tracker.get_doc_stats(doc_id)
     logger.info(f"\n{'='*70}")
-    logger.info(f"✅ Completed processing document {doc_index}")
+    logger.info(f"✅ Completed document {doc_index} | "
+                f"Calls: {doc_tokens['total_calls']}, "
+                f"Input: {doc_tokens['total_input_tokens']:,}, "
+                f"Output: {doc_tokens['total_output_tokens']:,}, "
+                f"Total: {doc_tokens['total_tokens']:,}")
     logger.info(f"{'='*70}\n")
+    return doc_tokens
+
+
+def _build_context_index(input_path: str, start_index: int, end_index: int):
+    """Dedup contexts by hash. Returns (unique_contexts, index_to_hash).
+    unique_contexts: {hash: (first_doc_index, context_text)}
+    index_to_hash: {doc_index: hash}
+    """
+    from src.kg.utils.file_operations import parse_jsonl
+    from src.kg.utils.text_processing import compute_mdhash_id
+
+    docs = parse_jsonl(input_path)
+    unique_contexts = {}  # hash -> (first_index, text)
+    index_to_hash = {}
+
+    for idx in range(start_index, end_index):
+        if idx >= len(docs):
+            break
+        ctx = docs[idx].get("context", "")
+        h = compute_mdhash_id(ctx)
+        index_to_hash[idx] = h
+        if h not in unique_contexts:
+            unique_contexts[h] = (idx, ctx)
+
+    return unique_contexts, index_to_hash
+
 
 
 def main():
@@ -441,6 +498,18 @@ def main():
     parser.add_argument("--skip_augment", action="store_true",
                         help="Skip KG augmentation step")
 
+    # Embedding provider for augmentation
+    parser.add_argument("--embedding_provider", type=str, default=None,
+                        help="Embedding provider for augmentation: ollama | bge | qwen")
+    parser.add_argument("--embedding_model_path", type=str, default=None,
+                        help="Model path for bge/qwen embedding (default: model/raw/bge-m3 or model/raw/qwen3)")
+
+    # LLM provider override
+    parser.add_argument("--llm_provider", type=str, default=None,
+                        help="Override LLM provider: gpt | deepseek | gemini | vllm")
+    parser.add_argument("--max_async_calls", type=int, default=None,
+                        help="Override max concurrent LLM calls (default from config)")
+
     # Token tracking options
     parser.add_argument("--show_token_details", action="store_true",
                         help="Show detailed per-call token breakdown at the end")
@@ -460,19 +529,48 @@ def main():
             input_path = args.input_file
         else:
             input_path = f"./data/raw/{args.dataset}.jsonl"
-
-        # Create output directory
-        if args.output_dir:
-            output_dir = Path(args.output_dir)
-        else:
-            output_dir = Path(f"./data/preprocessed/{args.dataset}")
-        output_dir.mkdir(parents=True, exist_ok=True)
+            if not Path(input_path).exists():
+                input_path = f"./data/raw/additional/{args.dataset}.jsonl"
 
         # Load config
         config = None
         if args.config and Path(args.config).exists():
             with open(args.config, 'r') as f:
                 config = yaml.safe_load(f)
+
+        # Override LLM provider if specified
+        if args.llm_provider:
+            if config is None:
+                config = {}
+            config.setdefault('services', {}).setdefault('llm', {})['provider'] = args.llm_provider
+            logger.info(f"LLM provider override: {args.llm_provider}")
+
+        # Create output directory (after config loaded so we can resolve actual model name)
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+        else:
+            vllm_model = os.environ.get("VLLM_MODEL", "")
+            if vllm_model:
+                model_name = Path(vllm_model).name
+            else:
+                # Resolve actual model name from llm_api config
+                provider = args.llm_provider or (config or {}).get('services', {}).get('llm', {}).get('provider', 'default')
+                llm_api_path = Path("src/config/llm.yaml")
+                if llm_api_path.exists():
+                    with open(llm_api_path) as f:
+                        llm_api_cfg = yaml.safe_load(f)
+                    model_name = llm_api_cfg.get('llm_api', {}).get(provider, {}).get('model', provider)
+                else:
+                    model_name = provider
+            output_dir = Path(f"./data/preprocessed/{model_name}/{args.dataset}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory: {output_dir}")
+
+        # Override max_async_calls if specified
+        if args.max_async_calls:
+            from src.kg.utils import llm_client
+            llm_client.MAX_ASYNC_CALL_SIZE = args.max_async_calls
+            logger.info(f"Max async calls override: {args.max_async_calls}")
 
         # Process each document
         logger.info(f"\n{'='*70}")
@@ -481,15 +579,31 @@ def main():
         logger.info(f"Output: {output_dir}")
         logger.info(f"{'='*70}\n")
 
-        # Process documents with concurrency control
+        # Context deduplication
+        unique_contexts, index_to_hash = _build_context_index(
+            input_path, args.start_index, args.end_index
+        )
+        logger.info(f"Context dedup: {len(index_to_hash)} docs -> {len(unique_contexts)} unique contexts")
+
+        # Save context map
+        import json as _json
+        context_map_path = output_dir / "context_map.json"
+        with open(context_map_path, "w") as f:
+            _json.dump({str(k): v for k, v in index_to_hash.items()}, f, indent=2)
+        logger.info(f"Context map saved to {context_map_path}")
+
+        # Build KG only for unique contexts
         semaphore = asyncio.Semaphore(args.max_concurrent)
+        per_doc_stats = {}
+
+        # Collect representative doc indices (first occurrence of each unique context)
+        representative_indices = {info[0] for info in unique_contexts.values()}
 
         async def process_with_semaphore(idx):
             async with semaphore:
                 try:
-                    # Create independent KG instance for each document
                     doc_kg = KnowledgeGraph(config=config, working_dir=str(output_dir))
-                    await process_document(
+                    doc_tokens = await process_document(
                         kg=doc_kg,
                         input_path=input_path,
                         doc_index=idx,
@@ -500,16 +614,21 @@ def main():
                         similarity_threshold=args.similarity_threshold,
                         skip_build=args.skip_build,
                         skip_augment=args.skip_augment,
+                        embedding_provider=args.embedding_provider,
+                        embedding_model_path=args.embedding_model_path,
                     )
+                    if doc_tokens is not None:
+                        per_doc_stats[idx] = doc_tokens
                 except Exception as e:
                     logger.error(f"Error processing document {idx}: {e}")
                     import traceback
                     traceback.print_exc()
 
-        # Run all documents with controlled concurrency
+        # Only process representative (unique) documents
         await asyncio.gather(*[
             process_with_semaphore(idx)
             for idx in range(args.start_index, args.end_index)
+            if idx in representative_indices
         ])
 
         # End timing
@@ -530,6 +649,47 @@ def main():
         logger.info(f"{'='*70}\n")
 
         # Print token usage summary
+        # Per-document breakdown
+        if per_doc_stats:
+            print("\n" + "="*80)
+            print("PER-DOCUMENT TOKEN USAGE")
+            print("="*80)
+            print(f"{'Doc':>5} | {'Calls':>6} | {'Input Tokens':>14} | {'Output Tokens':>14} | {'Total Tokens':>14}")
+            print("-"*80)
+            for idx in sorted(per_doc_stats):
+                s = per_doc_stats[idx]
+                print(f"{idx:>5} | {s['total_calls']:>6} | {s['total_input_tokens']:>14,} | {s['total_output_tokens']:>14,} | {s['total_tokens']:>14,}")
+            print("="*80 + "\n")
+
+        # Save stats to llmstats/{model}/{dataset}/{start}_{end}.json
+        # Only save when there were actual LLM calls (skip for augment-only runs)
+        import json
+        total_llm_calls = sum(s["total_calls"] for s in per_doc_stats.values()) if per_doc_stats else 0
+        if total_llm_calls > 0:
+            model_short = Path(output_dir).parent.name
+            stats_dir = Path(f"./log/llmstats/{model_short}/{args.dataset}")
+            stats_dir.mkdir(parents=True, exist_ok=True)
+            stats_file = stats_dir / f"{args.start_index}_{args.end_index}.json"
+            stats_payload = {
+                "model": model_short,
+                "dataset": args.dataset,
+                "range": [args.start_index, args.end_index],
+                "elapsed_seconds": round(elapsed_time, 2),
+                "per_document": {str(idx): per_doc_stats[idx] for idx in sorted(per_doc_stats)},
+                "global": {
+                    "total_calls": total_llm_calls,
+                    "total_input_tokens": sum(s["total_input_tokens"] for s in per_doc_stats.values()),
+                    "total_output_tokens": sum(s["total_output_tokens"] for s in per_doc_stats.values()),
+                    "total_tokens": sum(s["total_tokens"] for s in per_doc_stats.values()),
+                },
+            }
+            with open(stats_file, "w") as f:
+                json.dump(stats_payload, f, indent=2)
+            logger.info(f"Token stats saved to {stats_file}")
+        else:
+            logger.info("No LLM calls made, skipping llmstats save")
+
+        # Global summary
         print_token_summary()
 
         # Print detailed breakdown if requested

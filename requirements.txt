@@ -16,7 +16,7 @@ graspologic>=3.2.0  # For stable largest connected component
 
 # ===== Embedding and Vector DB =====
 # Note: Ollama is used as external service (http://localhost:11434)
-ollama-python>=0.1.0  # Optional Python client
+ollama>=0.4.0  # Optional Python client
 
 # ===== LLM API Clients =====
 openai>=1.0.0  # For OpenAI-compatible APIs
@@ -43,13 +43,15 @@ aiohttp>=3.8.0  # For async HTTP requests
 tenacity>=8.2.0  # For retry logic
 
 # ===== Token Cost Tracking =====
-tokencost>=0.1.0  # Optional: for cost calculation
+# tokencost>=0.1.0  # Optional: for cost calculation (not available on PyPI)
 
 # ===== Logging and Monitoring =====
 loguru>=0.7.0  # Enhanced logging
 wandb>=0.15.0  # Optional: for experiment tracking
 
 # ===== Evaluation Metrics =====
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
 rouge-score>=0.1.2
 sacrebleu>=2.3.0
 bert-score>=0.3.13  # Optional: for BERTScore

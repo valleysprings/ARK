@@ -2,7 +2,7 @@
 Embedding Utilities for Answer Augmented Retrieval
 
 Provides embedding functions and wrappers for entity vectorization.
-Uses Ollama with BGE-M3 model for local embeddings.
+Supports Ollama (BGE-M3) and SentenceTransformer backends.
 """
 
 import asyncio
@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 import numpy as np
-from ollama import Client
+
+try:
+    from ollama import Client as OllamaClient
+    _ollama_available = True
+except ImportError:
+    _ollama_available = False
 
 try:
     from .text_processing import compute_mdhash_id
@@ -24,13 +29,17 @@ except ImportError:
 
 # Ollama Client Configuration
 OLLAMA_HOST = "http://localhost:11434"
-client = Client(host=OLLAMA_HOST)
+client = OllamaClient(host=OLLAMA_HOST) if _ollama_available else None
 
 # Embedding Model Configuration
 EMBEDDING_MODEL = "bge-m3:latest"
 EMBEDDING_MODEL_DIM = 1024
 EMBEDDING_MODEL_MAX_TOKENS = 8000
 MAX_ASYNC_CALL_SIZE = 10
+
+# SentenceTransformer singleton
+_st_model = None
+_st_model_path = None
 
 
 # ============================================================================
@@ -155,6 +164,64 @@ async def ollama_embedding(texts: list[str]) -> np.ndarray:
     embed_text = data["embeddings"]
 
     return np.array(embed_text)
+
+
+# ============================================================================
+# Local GPU Embedding (BGE-M3 / Qwen3-Embedding)
+# ============================================================================
+
+_local_model = None
+_local_model_path = None
+_local_model_type = None  # "bge" or "qwen"
+
+
+def _get_local_model(model_path: str, model_type: str):
+    """Lazy-load local embedding model singleton."""
+    global _local_model, _local_model_path, _local_model_type
+    if _local_model is not None and _local_model_path == model_path:
+        return _local_model, _local_model_type
+
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if model_type == "bge":
+        from FlagEmbedding import BGEM3FlagModel
+        _local_model = BGEM3FlagModel(model_path, use_fp16=True, device=device)
+    else:  # qwen
+        from sentence_transformers import SentenceTransformer
+        _local_model = SentenceTransformer(
+            model_path, device=device,
+            model_kwargs={"dtype": "bfloat16"}
+        )
+
+    _local_model_path = model_path
+    _local_model_type = model_type
+    return _local_model, _local_model_type
+
+
+def create_local_embedding(model_path: str = "model/raw/bge-m3",
+                           model_type: str = "bge") -> "EmbeddingFunc":
+    """
+    Create a local GPU embedding function (BGE-M3 or Qwen3-Embedding).
+
+    Args:
+        model_path: Path to embedding model
+        model_type: "bge" or "qwen"
+    """
+    @wrap_embedding_func_with_attrs(
+        embedding_dim=EMBEDDING_MODEL_DIM,
+        max_token_size=EMBEDDING_MODEL_MAX_TOKENS,
+    )
+    async def _local_embedding(texts: list[str]) -> np.ndarray:
+        model, mtype = _get_local_model(model_path, model_type)
+        if mtype == "bge":
+            result = model.encode(texts, return_dense=True,
+                                  return_sparse=False, return_colbert_vecs=False)
+            return np.array(result['dense_vecs'])
+        else:
+            return np.array(model.encode(texts))
+
+    return _local_embedding
 
 
 # ============================================================================

@@ -1,121 +1,28 @@
 # Training Configuration
-# Configuration for fine-tuning retrieval models
+# Hyperparameters for fine-tuning retrieval models (MS-SWIFT)
 
-# Paths configuration
-paths:
-  data_root: "./data"
-  model_root: "./model"
-  output_root: "./experiments/results"
-  cache_root: "./data/preprocessed"
+model_name_or_path: "./model/raw/qwen3"
 
-# Training Configuration
-training:
-  # Common settings
-  common:
-    output_dir: "./model/checkpoints"
-    logging_dir: "./experiments/logs"
-    seed: 42
-    fp16: true
-    gradient_checkpointing: false
+# Training hyperparameters
+per_device_train_batch_size: 32
+loss_type: infonce
+task_type: embedding
+overwrite_output_dir: true
 
-  # Qwen Embedding Training
-  qwen:
-    enabled: true
-    model_name_or_path: "./model/raw/qwen3"
+# Per-stage curriculum
+curriculum:
+  stage1:
+    epochs: 3
+    learning_rate: 1e-5
+    warmup_steps: 50
+  stage2:
+    epochs: 4
+    learning_rate: 8.0e-6
+    warmup_steps: 0
+  stage3:
+    epochs: 3
+    learning_rate: 4.0e-6
+    warmup_steps: 0
 
-    # Dataset Configuration
-    datasets:
-      fin:
-        enabled: true
-        limit: null  # null means use all data, or set a number like 1000
-
-    # Training hyperparameters
-    per_device_train_batch_size: 8
-    gradient_accumulation_steps: 16
-    learning_rate: 6.0e-6
-    num_train_epochs: 10
-    warmup_steps: 100
-    weight_decay: 0.01
-
-    # Triple alignment scoring
-    alignment:
-      forward_weight: 1.0    # P(answer|chunk, question)
-      backward_weight: 0.3   # P(question|chunk, answer)
-      parameter_weight: 1.0  # cosine(query_emb, chunk_emb)
-      top_m: 10  # Number of positive chunks to select
-
-    # Curriculum learning stages
-    curriculum:
-      stage1_epochs: 3  # Initial alignment
-      stage2_epochs: 4  # Coarse-grained (large subgraph)
-      stage3_epochs: 3  # Fine-grained (small subgraph)
-
-      # Stage-specific configuration
-      stage1:
-        num_positives: 5  # Top-k chunks from alignment as positives
-        num_negatives: 16  # Number of negatives per sample
-
-      stage2:
-        num_positives: 5  # Top-k chunks from alignment as positives
-        num_negatives: 16  # Number of negatives per sample
-        use_in_batch_negatives: false  # Do not use in-batch negatives
-        retrieval_top_k: 10  # Top-k chunks to retrieve per query
-
-      stage3:
-        num_positives: 5  # Top-k chunks from alignment as positives
-        num_negatives: 16  # Number of negatives per sample
-        use_in_batch_negatives: false  # Do not use in-batch negatives
-        retrieval_top_k: 10  # Top-k chunks to retrieve per query
-
-    # Loss function
-    loss_type: "cosine_similarity"  # For MS-SWIFT
-    task_type: "embedding"
-
-# Evaluation Configuration
-evaluation:
-  # Datasets
-  datasets:
-    - name: "hotpotqa"
-      path: "./data/raw/hotpotqa.jsonl"
-      metric: "f1"
-    - name: "2wikimqa"
-      path: "./data/raw/2wikimqa.jsonl"
-      metric: "f1"
-    - name: "narrativeqa"
-      path: "./data/raw/narrativeqa.jsonl"
-      metric: "f1"
-    - name: "musique"
-      path: "./data/raw/musique.jsonl"
-      metric: "f1"
-    - name: "qasper"
-      path: "./data/raw/qasper.jsonl"
-      metric: "f1"
-
-  # Metrics
-  metrics:
-    - "f1"
-    - "exact_match"
-    - "rouge"
-
-  # Evaluation settings
-  batch_size: 16
-  max_samples: 100  # -1 for all samples
-  save_predictions: true
-
-# Logging and Monitoring
-logging:
-  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "./experiments/logs/ark.log"
-  console: true
-
-# Experiment Management
-experiment:
-  name: "default"
-  tags: []
-  notes: ""
-  save_config: true
-  save_code: false
-  use_wandb: false
-  wandb_project: "ark"
-  wandb_entity: null
+# Device for chunk matching, 0 does not stands for single GPU, since it is DP (data parallel)
+device: "cuda:0"

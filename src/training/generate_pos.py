@@ -11,16 +11,26 @@ the quality of chunk-question-answer alignments using three complementary metric
 import asyncio
 import json
 import math
+import os
+import re
+import subprocess
+import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Callable
 import yaml
 
+import requests
 import torch
 from torch.nn.functional import log_softmax
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+from src.kg.utils.text_processing import (
+    chunking_by_token_size, chunking_by_sentence,
+    TextChunkSchema, ENCODER as TIKTOKEN_ENCODER,
+)
 
 @dataclass
 class AlignmentConfig:
@@ -40,38 +50,36 @@ class AlignmentConfig:
     forward_weight: float = 1.0
     backward_weight: float = 0.3
     parameter_weight: float = 1.0
-    chunk_size: int = 512
-    overlap: int = 12
+    chunk_size: int = 1
+    overlap: int = 0
+    chunk_method: str = "sentence"
     batch_size: int = 64
     max_context_length: Optional[int] = None
     device: str = "cuda"
     normalize_scores: bool = True
+    gpu_memory_utilization: float = 0.85
+    vllm_max_model_len: int = 8192
+    top_k: int = 10
+    min_chunk_tokens: int = 10
 
     @classmethod
     def from_yaml(cls, config_path: str) -> "AlignmentConfig":
-        """Load configuration from YAML file.
-
-        Args:
-            config_path: Path to YAML configuration file
-
-        Returns:
-            AlignmentConfig instance
-        """
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
 
-        # Extract alignment config from nested structure
-        alignment_config = config.get('training', {}).get('qwen', {}).get('alignment', {})
-
         return cls(
-            forward_weight=alignment_config.get('forward_weight', 1.0),
-            backward_weight=alignment_config.get('backward_weight', 0.3),
-            parameter_weight=alignment_config.get('parameter_weight', 1.0),
-            chunk_size=config.get('kg', {}).get('chunk_size', 512),
-            overlap=config.get('kg', {}).get('chunk_overlap', 12),
-            batch_size=alignment_config.get('batch_size', 64),
-            device=config.get('training', {}).get('common', {}).get('device', 'cuda'),
-            normalize_scores=alignment_config.get('normalize_scores', True)
+            forward_weight=config['forward_weight'],
+            backward_weight=config['backward_weight'],
+            parameter_weight=config['parameter_weight'],
+            chunk_size=config['chunk_size'],
+            overlap=config['chunk_overlap'],
+            chunk_method=config['chunk_method'],
+            batch_size=config['batch_size'],
+            normalize_scores=config['normalize_scores'],
+            gpu_memory_utilization=config['gpu_memory_utilization'],
+            vllm_max_model_len=config['vllm_max_model_len'],
+            top_k=config['top_k'],
+            min_chunk_tokens=config['min_chunk_tokens'],
         )
 
 
@@ -97,36 +105,57 @@ class AlignmentScorer:
         embedding_model_path: str,
         config: Optional[AlignmentConfig] = None,
         use_multiprocessing: bool = False,
-        max_workers: Optional[int] = None
+        max_workers: Optional[int] = None,
+        use_vllm: bool = False,
+        vllm_port: int = 8199,
+        vllm_device: str = "cuda:0",
+        use_vllm_offline: bool = False,
     ):
-        """Initialize the alignment scorer.
-
-        Args:
-            lm_model_path: Path to language model for forward/backward alignment
-            embedding_model_path: Path to embedding model for parameter alignment
-            config: AlignmentConfig instance. If None, uses default config
-            use_multiprocessing: Whether to use ProcessPoolExecutor (True) or ThreadPoolExecutor (False)
-            max_workers: Maximum number of workers for parallel execution
-        """
         self.config = config or AlignmentConfig()
+        self.use_vllm = use_vllm
+        self.use_vllm_offline = use_vllm_offline
+        self.lm_model_path = lm_model_path
+        self.vllm_port = vllm_port
+        self._vllm_proc = None
+        self.vllm_llm = None
 
-        # Load language model
-        print(f"Loading language model from {lm_model_path}...")
+        # Load tokenizer (needed for both modes)
+        print(f"Loading tokenizer from {lm_model_path}...")
         self.lm_tokenizer = AutoTokenizer.from_pretrained(lm_model_path, use_fast=True)
         if self.lm_tokenizer.pad_token is None:
             self.lm_tokenizer.pad_token = self.lm_tokenizer.eos_token
 
-        self.lm_model = AutoModelForCausalLM.from_pretrained(
-            lm_model_path,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            attn_implementation="eager"
-        )
-        self.lm_model = self.lm_model.to(self.config.device).eval()
-
-        # Store max context length
-        if self.config.max_context_length is None:
-            self.config.max_context_length = self.lm_model.config.max_position_embeddings
+        if use_vllm_offline:
+            from vllm import LLM, SamplingParams
+            print(f"Loading vLLM offline model from {lm_model_path}...")
+            self.vllm_llm = LLM(
+                model=lm_model_path,
+                max_model_len=self.config.vllm_max_model_len,
+                trust_remote_code=True,
+                dtype="float16",
+                gpu_memory_utilization=self.config.gpu_memory_utilization,
+            )
+            self.vllm_sampling_params = SamplingParams(
+                prompt_logprobs=1, max_tokens=1, temperature=0,
+            )
+            if self.config.max_context_length is None:
+                self.config.max_context_length = self.config.vllm_max_model_len
+        elif use_vllm:
+            self._start_vllm_server(vllm_device, self.config.vllm_max_model_len)
+            if self.config.max_context_length is None:
+                self.config.max_context_length = self.config.vllm_max_model_len
+        else:
+            # Load model locally
+            print(f"Loading language model from {lm_model_path}...")
+            self.lm_model = AutoModelForCausalLM.from_pretrained(
+                lm_model_path,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                attn_implementation="eager"
+            )
+            self.lm_model = self.lm_model.to(self.config.device).eval()
+            if self.config.max_context_length is None:
+                self.config.max_context_length = self.lm_model.config.max_position_embeddings
 
         # Load embedding model
         print(f"Loading embedding model from {embedding_model_path}...")
@@ -136,31 +165,61 @@ class AlignmentScorer:
             trust_remote_code=True
         )
 
-        # Initialize executor for parallel processing
         executor_class = ProcessPoolExecutor if use_multiprocessing else ThreadPoolExecutor
         self.executor = executor_class(max_workers=max_workers)
-
         print("AlignmentScorer initialized successfully.")
 
-    def text_to_chunks(self, text: str) -> List[str]:
-        """Split text into overlapping chunks.
+    def _start_vllm_server(self, device: str, max_model_len: int):
+        """Start vLLM server on specified GPU."""
+        gpu_id = device.split(":")[-1] if ":" in device else "0"
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu_id}
+        vllm_log = "/tmp/vllm_alignment_stderr.log"
+        self._vllm_log_f = open(vllm_log, "w")
+        print(f"Starting vLLM server: {self.lm_model_path} on GPU {gpu_id}, port {self.vllm_port}...")
+        self._vllm_proc = subprocess.Popen(
+            ["python", "-m", "vllm.entrypoints.openai.api_server",
+             "--model", self.lm_model_path, "--port", str(self.vllm_port),
+             "--trust-remote-code", "--max-model-len", str(max_model_len)],
+            env=env, stdout=self._vllm_log_f, stderr=self._vllm_log_f
+        )
+        for _ in range(120):
+            try:
+                r = requests.get(f"http://localhost:{self.vllm_port}/health", timeout=2)
+                if r.status_code == 200:
+                    print(f"vLLM server ready on port {self.vllm_port}")
+                    return
+            except Exception:
+                pass
+            time.sleep(2)
+        try:
+            with open(vllm_log, "r") as f:
+                print("=== vLLM server log ===")
+                print(f.read()[-3000:])
+                print("=== end vLLM log ===")
+        except Exception:
+            pass
+        raise RuntimeError("vLLM server failed to start")
 
-        Args:
-            text: Input text to be chunked
+    def _shutdown_vllm(self):
+        if self._vllm_proc:
+            self._vllm_proc.terminate()
+            self._vllm_proc.wait()
+            self._vllm_proc = None
+            print("vLLM server stopped")
 
-        Returns:
-            List of text chunks
-        """
-        words = text.split(' ')
-        chunks = []
-        step = self.config.chunk_size - self.config.overlap
-
-        for i in range(0, len(words), step):
-            chunk = ' '.join(words[i:i + self.config.chunk_size]).strip()
-            if chunk:
-                chunks.append(chunk)
-
-        return chunks
+    def text_to_chunks(self, text: str) -> List[TextChunkSchema]:
+        """Split text into chunks, returning TextChunkSchema list."""
+        if self.config.chunk_method == "sentence":
+            return chunking_by_sentence(
+                text, max_sentences=self.config.chunk_size,
+                overlap_sentences=self.config.overlap,
+            )
+        tokens = TIKTOKEN_ENCODER.encode(text)
+        return chunking_by_token_size(
+            [tokens], tiktoken_model=TIKTOKEN_ENCODER,
+            overlap_token_size=self.config.overlap,
+            max_token_size=self.config.chunk_size,
+        )
 
     @staticmethod
     def normalize_scores(scores: List[Optional[float]]) -> List[Optional[float]]:
@@ -191,31 +250,110 @@ class AlignmentScorer:
         targets: List[str],
         desc: str = "Computing"
     ) -> List[float]:
-        """Compute log probabilities of targets given prompts.
+        if self.use_vllm_offline:
+            return self._compute_lm_logprob_offline(prompts, targets, desc)
+        if self.use_vllm:
+            return self._compute_lm_logprob_vllm(prompts, targets, desc)
+        return self._compute_lm_logprob_local(prompts, targets, desc)
 
-        This is an internal method used by forward_alignment and backward_alignment.
-
-        Args:
-            prompts: List of prompt strings
-            targets: List of target strings (one per prompt)
-            desc: Description for progress bar
-
-        Returns:
-            List of average log probabilities
-        """
-        results = []
-        device = self.config.device
+    def _compute_lm_logprob_offline(
+        self,
+        prompts: List[str],
+        targets: List[str],
+        desc: str = "Computing"
+    ) -> List[float]:
+        """Compute log probabilities via vLLM offline batch inference."""
         max_ctx = self.config.max_context_length
+        tgt_ids = self.lm_tokenizer(targets[0], add_special_tokens=False)["input_ids"]
+        tgt_len = len(tgt_ids)
 
-        # Assume all targets are the same (as in the original implementation)
+        full_texts = []
+        prefix_lens = []
+        for prompt, target in zip(prompts, targets):
+            prom_ids = self.lm_tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            if len(prom_ids) + tgt_len > max_ctx:
+                prom_ids = prom_ids[:max(max_ctx - tgt_len, 0)]
+            prefix_lens.append(len(prom_ids))
+            full_texts.append(
+                self.lm_tokenizer.decode(prom_ids, skip_special_tokens=False) + target
+            )
+
+        outputs = self.vllm_llm.generate(full_texts, self.vllm_sampling_params)
+
+        results = []
+        for out, plen in zip(outputs, prefix_lens):
+            plp = out.prompt_logprobs
+            token_lps = []
+            for pos in range(plen, min(plen + tgt_len, len(plp))):
+                if plp[pos] is not None:
+                    # Each position is a dict {token_id: Logprob}; get the actual token's logprob
+                    token_id = out.prompt_token_ids[pos]
+                    if token_id in plp[pos]:
+                        token_lps.append(plp[pos][token_id].logprob)
+            results.append(sum(token_lps) / len(token_lps) if token_lps else float('-inf'))
+
+        return results
+
+    def _compute_lm_logprob_vllm(
+        self,
+        prompts: List[str],
+        targets: List[str],
+        desc: str = "Computing"
+    ) -> List[float]:
+        """Compute log probabilities via vLLM server (echo + logprobs)."""
+        results = []
+        max_ctx = self.config.max_context_length
         tgt_ids = self.lm_tokenizer(targets[0], add_special_tokens=False)["input_ids"]
 
         for prompt, target in tqdm(zip(prompts, targets), total=len(prompts), desc=desc, leave=False):
             prom_ids = self.lm_tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            total_len = len(prom_ids) + len(tgt_ids)
+            if len(prom_ids) + len(tgt_ids) > max_ctx:
+                avail = max_ctx - len(tgt_ids)
+                prom_ids = prom_ids[:max(avail, 0)]
 
-            # Truncate prompt if necessary
-            if total_len > max_ctx:
+            ctx_len = len(prom_ids)
+            full_text = self.lm_tokenizer.decode(prom_ids, skip_special_tokens=False) + target
+
+            try:
+                resp = requests.post(
+                    f"http://localhost:{self.vllm_port}/v1/completions",
+                    json={
+                        "model": self.lm_model_path,
+                        "prompt": full_text,
+                        "max_tokens": 1,
+                        "echo": True,
+                        "logprobs": 1,
+                        "temperature": 0.0,
+                    },
+                    timeout=120
+                )
+                resp.raise_for_status()
+                token_logprobs = resp.json()["choices"][0]["logprobs"]["token_logprobs"]
+                # Extract logprobs for target tokens (positions after prompt)
+                target_lps = token_logprobs[ctx_len:ctx_len + len(tgt_ids)]
+                valid = [lp for lp in target_lps if lp is not None]
+                results.append(sum(valid) / len(valid) if valid else float('-inf'))
+            except Exception as e:
+                print(f"vLLM logprob error: {e}")
+                results.append(float('-inf'))
+
+        return results
+
+    def _compute_lm_logprob_local(
+        self,
+        prompts: List[str],
+        targets: List[str],
+        desc: str = "Computing"
+    ) -> List[float]:
+        """Compute log probabilities locally with loaded model."""
+        results = []
+        device = self.config.device
+        max_ctx = self.config.max_context_length
+        tgt_ids = self.lm_tokenizer(targets[0], add_special_tokens=False)["input_ids"]
+
+        for prompt, target in tqdm(zip(prompts, targets), total=len(prompts), desc=desc, leave=False):
+            prom_ids = self.lm_tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            if len(prom_ids) + len(tgt_ids) > max_ctx:
                 avail = max_ctx - len(tgt_ids)
                 prom_ids = prom_ids[:max(avail, 0)]
 
@@ -235,7 +373,6 @@ class AlignmentScorer:
             ids = encodings.input_ids[0, ctx_len:ctx_len+len(tgt_ids)]
             pred_logp = logp[0, ctx_len-1:ctx_len-1+len(tgt_ids)]
             tok_logp = pred_logp.gather(1, ids.unsqueeze(1))
-
             results.append(tok_logp.mean().item())
 
         return results
@@ -416,67 +553,43 @@ class AlignmentScorer:
         question: str,
         answer: str,
         context: str,
-        top_k: Optional[int] = None
     ) -> Dict[str, Any]:
         """Score a single question-answer-context triplet.
 
-        Args:
-            question: The question text
-            answer: The answer text (can be string or list)
-            context: The full context text to be chunked
-            top_k: If specified, return only top-k chunks
-
-        Returns:
-            Dictionary containing:
-            - chunks: List of chunks (sorted by score if top_k specified)
-            - scores: List of alignment scores
-            - forward_scores: List of forward alignment scores
-            - backward_scores: List of backward alignment scores
-            - parameter_scores: List of parameter alignment scores
+        Returns unsorted:
+            {chunks, scores, forward_scores, backward_scores, parameter_scores}
         """
-        # Handle answer format
         if isinstance(answer, list) and answer:
             answer = answer[0]
 
-        # Chunk the context
-        chunks = self.text_to_chunks(context)
-        if not chunks:
+        chunk_schemas = self.text_to_chunks(context)
+        if not chunk_schemas:
             return {
-                'chunks': [],
-                'scores': [],
-                'forward_scores': [],
-                'backward_scores': [],
-                'parameter_scores': []
+                'chunks': [], 'scores': [], 'forward_scores': [],
+                'backward_scores': [], 'parameter_scores': [],
             }
 
-        print(f"  → Split into {len(chunks)} chunks")
+        chunk_texts = [c["content"] for c in chunk_schemas]
+        print(f"  → Split into {len(chunk_texts)} chunks")
 
-        # Compute scores
         print(f"  → Computing alignment scores...")
         final_scores, components = self.compute_score(
-            chunks, question, answer, return_components=True
+            chunk_texts, question, answer, return_components=True
         )
 
-        # Sort by score and optionally select top-k
-        sorted_indices = sorted(
-            range(len(final_scores)),
-            key=lambda i: final_scores[i],
-            reverse=True
-        )
-
-        if top_k is not None:
-            original_count = len(sorted_indices)
-            sorted_indices = sorted_indices[:top_k]
-            print(f"  → Selected top-{len(sorted_indices)} chunks (from {original_count} total)")
-        else:
-            print(f"  → Keeping all {len(sorted_indices)} chunks")
+        # Apply short-phrase penalty
+        min_tok = self.config.min_chunk_tokens
+        for i, c in enumerate(chunk_schemas):
+            if c["tokens"] < min_tok:
+                penalty = c["tokens"] / min_tok
+                final_scores[i] *= penalty
 
         return {
-            'chunks': [chunks[i] for i in sorted_indices],
-            'scores': [final_scores[i] for i in sorted_indices],
-            'forward_scores': [components['forward'][i] for i in sorted_indices],
-            'backward_scores': [components['backward'][i] for i in sorted_indices],
-            'parameter_scores': [components['parameter'][i] for i in sorted_indices]
+            'chunks': chunk_schemas,
+            'scores': final_scores,
+            'forward_scores': components['forward'],
+            'backward_scores': components['backward'],
+            'parameter_scores': components['parameter'],
         }
 
     async def score_single_item_async(
@@ -484,19 +597,8 @@ class AlignmentScorer:
         question: str,
         answer: str,
         context: str,
-        top_k: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Async version of score_single_item.
-
-        Args:
-            question: The question text
-            answer: The answer text
-            context: The full context text
-            top_k: If specified, return only top-k chunks
-
-        Returns:
-            Same as score_single_item
-        """
+        """Async version of score_single_item."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.executor,
@@ -504,55 +606,31 @@ class AlignmentScorer:
             question,
             answer,
             context,
-            top_k
         )
 
     def score_batch(
         self,
         items: List[Dict[str, Any]],
-        top_k: Optional[int] = None,
         show_progress: bool = True
     ) -> List[Dict[str, Any]]:
-        """Score a batch of items sequentially.
-
-        Args:
-            items: List of dictionaries with keys 'question', 'answer', 'context'
-            top_k: If specified, return only top-k chunks per item
-            show_progress: Whether to show progress bar
-
-        Returns:
-            List of scoring results (one per input item)
-        """
+        """Score a batch of items sequentially."""
         results = []
         iterator = tqdm(items, desc="Scoring items") if show_progress else items
-
         for item in iterator:
             result = self.score_single_item(
                 question=item['question'],
                 answer=item['answer'],
                 context=item['context'],
-                top_k=top_k
             )
             results.append(result)
-
         return results
 
     async def score_batch_async(
         self,
         items: List[Dict[str, Any]],
-        top_k: Optional[int] = None,
         max_concurrent: int = 10
     ) -> List[Dict[str, Any]]:
-        """Score a batch of items asynchronously with concurrency control.
-
-        Args:
-            items: List of dictionaries with keys 'question', 'answer', 'context'
-            top_k: If specified, return only top-k chunks per item
-            max_concurrent: Maximum number of concurrent scoring operations
-
-        Returns:
-            List of scoring results (one per input item)
-        """
+        """Score a batch of items asynchronously with concurrency control."""
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def score_with_semaphore(item):
@@ -561,18 +639,19 @@ class AlignmentScorer:
                     question=item['question'],
                     answer=item['answer'],
                     context=item['context'],
-                    top_k=top_k
                 )
 
         tasks = [score_with_semaphore(item) for item in items]
         return await asyncio.gather(*tasks)
 
     def cleanup(self):
-        """Clean up resources (executor, models)."""
+        """Clean up resources (executor, models, vLLM server)."""
+        self._shutdown_vllm()
+        if self.vllm_llm is not None:
+            del self.vllm_llm
+            self.vllm_llm = None
         if hasattr(self, 'executor'):
             self.executor.shutdown(wait=True)
-
-        # Clear GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -585,104 +664,171 @@ class AlignmentScorer:
         self.cleanup()
 
 
+def clean_content(text: str) -> str:
+    """Remove newlines, dash sequences, and decorative non-alphanumeric symbols.
+    Keep letters, digits, spaces, and basic punctuation."""
+    text = text.replace('\n', ' ')
+    text = re.sub(r'-{2,}', ' ', text)
+    text = re.sub(r'[^\w\s.,;:!?\'\"()\[\]{}/\\@#$%&*+=<>-]', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def main():
-    """Example usage of AlignmentScorer."""
     import argparse
     import jsonlines
 
     parser = argparse.ArgumentParser(description="Triple Alignment Scoring")
-    parser.add_argument('--input_jsonl', type=str, required=True,
-                        help='Input JSONL file with questions, answers, and contexts')
-    parser.add_argument('--output_dir', type=str, required=True,
-                        help='Output directory for individual score files (one per sample)')
-    parser.add_argument('--config', type=str, default='./config.yaml',
-                        help='Path to config.yaml')
-    parser.add_argument('--lm_model', type=str, required=True,
-                        help='Path to language model')
-    parser.add_argument('--embedding_model', type=str, required=True,
-                        help='Path to embedding model')
-    parser.add_argument('--top_k', type=int, default=1000,
-                        help='Number of top chunks to keep')
-    parser.add_argument('--start_index', type=int, default=0,
-                        help='Start index for processing (inclusive)')
-    parser.add_argument('--end_index', type=int, default=None,
-                        help='End index for processing (exclusive)')
-    parser.add_argument('--use_async', action='store_true',
-                        help='Use async processing')
-    parser.add_argument('--max_concurrent', type=int, default=10,
-                        help='Maximum concurrent async operations')
-
+    parser.add_argument('--input_jsonl', type=str, required=True)
+    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--config', type=str, default='./config.yaml')
+    parser.add_argument('--lm_model', type=str, required=True)
+    parser.add_argument('--embedding_model', type=str, required=True)
+    parser.add_argument('--start_index', type=int, default=0)
+    parser.add_argument('--end_index', type=int, default=None)
+    parser.add_argument('--use_async', action='store_true')
+    parser.add_argument('--max_concurrent', type=int, default=10)
+    parser.add_argument('--use_vllm', action='store_true')
+    parser.add_argument('--vllm_port', type=int, default=8199)
+    parser.add_argument('--vllm_device', type=str, default='cuda:0')
+    parser.add_argument('--use_vllm_offline', action='store_true')
+    parser.add_argument('--gpu_id', type=int, default=None)
+    parser.add_argument('--chunk_method', type=str, default=None)
+    parser.add_argument('--chunk_size', type=int, default=None)
+    parser.add_argument('--chunk_overlap', type=int, default=None)
     args = parser.parse_args()
 
-    # Load configuration
-    config = AlignmentConfig.from_yaml(args.config)
+    if args.gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
-    # Initialize scorer
-    with AlignmentScorer(args.lm_model, args.embedding_model, config) as scorer:
-        # Load data
-        print(f"Loading data from {args.input_jsonl}...")
+    config = AlignmentConfig.from_yaml(args.config)
+    if args.chunk_method is not None:
+        config.chunk_method = args.chunk_method
+    if args.chunk_size is not None:
+        config.chunk_size = args.chunk_size
+    if args.chunk_overlap is not None:
+        config.overlap = args.chunk_overlap
+
+    with AlignmentScorer(
+        args.lm_model, args.embedding_model, config,
+        use_vllm=args.use_vllm,
+        vllm_port=args.vllm_port,
+        vllm_device=args.vllm_device,
+        use_vllm_offline=args.use_vllm_offline,
+    ) as scorer:
+        input_path = args.input_jsonl
+        if not Path(input_path).exists():
+            alt_path = input_path.replace("/data/raw/", "/data/raw/additional/")
+            if Path(alt_path).exists():
+                input_path = alt_path
+            else:
+                raise FileNotFoundError(f"Not found: {input_path} or {alt_path}")
+
+        print(f"Loading data from {input_path}...")
         items = []
-        with jsonlines.open(args.input_jsonl) as reader:
+        with jsonlines.open(input_path) as reader:
             for idx, item in enumerate(reader):
-                # Skip items before start_index
                 if idx < args.start_index:
                     continue
-
-                # Stop if we've reached end_index
                 if args.end_index is not None and idx >= args.end_index:
                     break
-
                 items.append({
                     'question': item['input'],
                     'answer': item['answers'],
                     'context': item['context'],
-                    'original_item': item
                 })
 
-        print(f"Loaded {len(items)} items (index {args.start_index} to {args.end_index or args.start_index + len(items)}).")
+        print(f"Loaded {len(items)} items (index {args.start_index} to "
+              f"{args.end_index or args.start_index + len(items)}).")
 
-        # Extract dataset name from input file path
-        # e.g., ./data/raw/hotpotqa.jsonl -> hotpotqa
-        import os
-        dataset_name = os.path.basename(args.input_jsonl).replace('.jsonl', '')
-
-        # Prepare output directory
-        from pathlib import Path
+        dataset_name = os.path.basename(input_path).replace('.jsonl', '')
         output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Score and write items one by one
+        # Create all output directories
+        dirs = {}
+        for name in ['chunk', 'full-rank', 'topk-rank']:
+            dirs[name] = output_dir / name
+            dirs[name].mkdir(parents=True, exist_ok=True)
+        for prefix in ['full', 'topk']:
+            for sub in ['score', 'forward', 'backward', 'parameter']:
+                key = f"{prefix}/{sub}"
+                dirs[key] = output_dir / prefix / sub
+                dirs[key].mkdir(parents=True, exist_ok=True)
+
         print(f"Processing and writing results to {output_dir}/...")
-        iterator = enumerate(items, start=args.start_index)
-        if not args.use_async:
-            iterator = tqdm(iterator, total=len(items), desc="Scoring items")
+        k = config.top_k
 
-        for idx, item in iterator:
-            # Score single item
+        for idx, item in tqdm(enumerate(items, start=args.start_index),
+                              total=len(items), desc="Scoring items"):
             result = scorer.score_single_item(
                 question=item['question'],
                 answer=item['answer'],
                 context=item['context'],
-                top_k=args.top_k
             )
 
-            # Prepare output
-            output = {
-                'input': item['question'],
-                'answers': item['answer'],
-                'chunk_list': result['chunks'],
-                'score_list': result['scores'],
-                'forward_list': result['forward_scores'],
-                'reverse_list': result['backward_scores'],
-                'qwen_list': result['parameter_scores']
-            }
+            n = len(result['chunks'])
+            fname = f"{dataset_name}_{idx}.json"
+            q, a = item['question'], item['answer']
+            chunk_contents = [c['content'] for c in result['chunks']]
 
-            # Write to individual file with format: {dataset}_{index}.json
-            output_file = output_dir / f"{dataset_name}_{idx}.json"
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(output, f, ensure_ascii=False, indent=2)
+            # 1) chunk/ — original order, no scores
+            _write_json(dirs['chunk'] / fname, {
+                'input': q, 'answers': a, 'chunk_list': chunk_contents,
+            })
 
-        print(f"Done! Wrote {len(items)} files to {output_dir}/")
+            # Helper: build sorted output for a given sort key
+            def _sorted_output(sort_key, limit=None):
+                indices = sorted(range(n), key=lambda i: result[sort_key][i], reverse=True)
+                if limit:
+                    indices = indices[:limit]
+                return {
+                    'input': q, 'answers': a,
+                    'chunk_list': [chunk_contents[i] for i in indices],
+                    'score_list': [result['scores'][i] for i in indices],
+                    'forward_list': [result['forward_scores'][i] for i in indices],
+                    'backward_list': [result['backward_scores'][i] for i in indices],
+                    'parameter_list': [result['parameter_scores'][i] for i in indices],
+                }
+
+            # 2) full/ — sub-dirs sorted by each score type
+            for sub, sort_key in [('score', 'scores'), ('forward', 'forward_scores'),
+                                  ('backward', 'backward_scores'), ('parameter', 'parameter_scores')]:
+                _write_json(dirs[f'full/{sub}'] / fname, _sorted_output(sort_key))
+
+            # 3) topk/ — same as full but top-k, with cleaned_content
+            for sub, sort_key in [('score', 'scores'), ('forward', 'forward_scores'),
+                                  ('backward', 'backward_scores'), ('parameter', 'parameter_scores')]:
+                out = _sorted_output(sort_key, limit=k)
+                out['chunk_list'] = [
+                    {'content': c, 'cleaned_content': clean_content(c)}
+                    for c in out['chunk_list']
+                ]
+                _write_json(dirs[f'topk/{sub}'] / fname, out)
+
+            # 4) full-rank/ — ranking indices (unsorted)
+            def _rank(key):
+                return sorted(range(n), key=lambda i: result[key][i], reverse=True)
+
+            _write_json(dirs['full-rank'] / fname, {
+                'input': q, 'answers': a,
+                'forward_rank': _rank('forward_scores'),
+                'backward_rank': _rank('backward_scores'),
+                'parameter_rank': _rank('parameter_scores'),
+            })
+
+            # 5) topk-rank/ — top-k ranking indices
+            _write_json(dirs['topk-rank'] / fname, {
+                'input': q, 'answers': a,
+                'forward_rank': _rank('forward_scores')[:k],
+                'backward_rank': _rank('backward_scores')[:k],
+                'parameter_rank': _rank('parameter_scores')[:k],
+            })
+
+        print(f"Done! Wrote {len(items)} items to {output_dir}/{{chunk,full,topk,full-rank,topk-rank}}/")
+
+
+def _write_json(path, obj):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == '__main__':

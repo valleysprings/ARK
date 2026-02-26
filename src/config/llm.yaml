@@ -1,0 +1,69 @@
+# LLM Configuration (merged from llm_api.yaml + llm_inference.yaml)
+
+# ============================================================
+# API Provider Configuration
+# ============================================================
+llm_api:
+  # DeepSeek API
+  deepseek:
+    model: "deepseek-chat"
+    timeout: 90
+    max_retries: 2
+
+  # GPT API
+  gpt:
+    # model: "gemini-2.5-flash-nothinking"
+    model: "gemini-2.5-flash"
+    timeout: 120
+    max_retries: 2
+
+  # Google Gemini API
+  gemini:
+    model: "gemini-2.5-flash"
+    timeout: 90
+    max_retries: 2
+
+  # Ollama Local API
+  ollama:
+    model: "mistral:latest"
+    timeout: 60
+
+  # vLLM Local Server (OpenAI-compatible)
+  vllm:
+    model: "model/llm/Qwen3-235B-A22B-Instruct-2507-FP8"
+    base_url: "http://localhost:8000/v1"
+    timeout: 600
+    max_retries: 3
+
+  # General settings
+  settings:
+    max_async_calls: 10
+    default_provider: "gpt"
+    enable_token_tracking: true
+    retry_delay: 10
+
+# ============================================================
+# Inference Configuration
+# ============================================================
+paths:
+  data_root: "./data"
+  model_root: "./model"
+  output_root: "./experiments/results"
+  cache_root: "./data/preprocessed"
+
+services:
+  llm:
+    provider: "gpt"
+    model: "gpt-4.1"
+    api_key: "${OPENAI_API_KEY}"
+    temperature: 0.7
+    max_tokens: 4096
+    timeout: 60
+
+generator:
+  provider: "vllm"
+  model: "model/llm/Mistral-7B-Instruct-v0.2"
+  max_new_tokens: 512
+  temperature: 0.1
+  top_p: 0.9
+  max_model_len: 32768

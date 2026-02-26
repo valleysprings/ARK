@@ -13,6 +13,7 @@ from typing import Dict, Any
 
 from src.inference.unified_retriever import (
     UnifiedRetriever,
+    VLLMGenerator,
     text_to_chunks,
     llm_generate
 )
@@ -25,7 +26,7 @@ def load_config(llm_config_path: str = None, retrieval_config_path: str = None, 
     Load and merge configs
 
     Args:
-        llm_config_path: Path to LLM config (src/config/llm_inference.yaml)
+        llm_config_path: Path to LLM config (src/config/llm.yaml)
         retrieval_config_path: Path to retrieval config (src/config/retrieval_model.yaml)
         exp_config_path: Path to experiment config (experiments/exp_*.yaml)
 
@@ -34,7 +35,7 @@ def load_config(llm_config_path: str = None, retrieval_config_path: str = None, 
     """
     # Default paths
     if llm_config_path is None:
-        llm_config_path = "src/config/llm_inference.yaml"
+        llm_config_path = "src/config/llm.yaml"
     if retrieval_config_path is None:
         retrieval_config_path = "src/config/retrieval_model.yaml"
 
@@ -55,8 +56,6 @@ def load_config(llm_config_path: str = None, retrieval_config_path: str = None, 
             "generator": llm_config.get("generator", {}),
             "pipeline": llm_config.get("pipeline", {}),
         },
-        "logging": llm_config.get("logging", {}),
-        "token_tracking": llm_config.get("token_tracking", {}),
     }
 
     # Merge experiment config if provided
@@ -77,49 +76,34 @@ def load_config(llm_config_path: str = None, retrieval_config_path: str = None, 
     return config
 
 
-def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, args=None):
+def run_inference_single(config: Dict[str, Any], dataset_path: str, args, retriever, generator):
     """
-    Run inference on dataset
-
-    Args:
-        config: Configuration dictionary
-        dataset_path: Path to JSONL dataset
-        output_path: Path to save results
+    Run inference on a single dataset (models already loaded).
     """
-    # Initialize retriever
-    retriever = UnifiedRetriever(config, device=args.device)
-
-    # Get configuration
     retriever_config = config["inference"]["retriever"]
     model_type = retriever_config["type"]
     model_config = retriever_config[model_type]
+    chunk_size = model_config["chunk_size"]
+    overlap = model_config["overlap"]
 
-    chunk_size = model_config.get("chunk_size", 512)
-    overlap = model_config.get("overlap", 12)
-
-    generator_config = config["inference"]["generator"]
-    llm_endpoint = generator_config["endpoint"]
-    llm_model = generator_config["model"]
-    llm_num_ctx = generator_config.get("num_ctx", 16384)  # Default: 16384
-
-    # Get dataset name for prompt
     dataset_name = Path(dataset_path).stem
     prompt_template = DATASET2PROMPT.get(dataset_name, ULTRADOMAIN_PROMPT)
 
-    print(f"=" * 60)
+    generator_config = config["inference"]["generator"]
+    llm_model = generator_config["model"]
+
+    print(f"\n" + "=" * 60)
     print(f"ARK Unified Inference")
     print(f"=" * 60)
     print(f"Retriever: {model_type.upper()}")
     print(f"Dataset: {dataset_name}")
     print(f"Chunk size: {chunk_size}, Overlap: {overlap}")
-    print(f"LLM: {llm_model} @ {llm_endpoint}")
+    print(f"LLM: {llm_model} (vLLM on {args.llm_device})")
     print(f"=" * 60)
 
-    # Load dataset
     with open(dataset_path, 'r') as f:
         dataset = [json.loads(line) for line in f]
 
-    # Apply limit if specified
     if args.limit:
         dataset = dataset[:args.limit]
 
@@ -129,135 +113,140 @@ def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, a
     for idx, entry in enumerate(dataset, 1):
         context = entry.get("context", "")
         question = entry.get("input", entry.get("question", ""))
-        # Handle different answer field names: answers (list), ideal, answer
         answer = entry.get("answers", entry.get("ideal", entry.get("answer", "")))
-        # If answers is a list, take the first one
         if isinstance(answer, list) and len(answer) > 0:
             answer = answer[0]
 
-        # Handle no_retrieval mode: skip chunking and use full context
         if model_type == "no_retrieval":
-            # Use full context directly without chunking or retrieval
+            # Truncate context to fit max_model_len * 0.5 (reserve space for generation)
+            max_model_len = generator_config["max_model_len"]
+            max_context_words = int(max_model_len * 0.5)
+            words = context.split()
+            if len(words) > max_context_words:
+                context = ' '.join(words[:max_context_words])
             context_text = context
-            prompt = prompt_template.format(
-                context=context_text,
-                input=question
-            )
-            # Generate answer
-            prediction = llm_generate(prompt, llm_endpoint, llm_model, llm_num_ctx)
-
-            # Compute F1 score
+            prompt = prompt_template.format(context=context_text, input=question)
+            prediction = llm_generate(prompt, generator=generator)
             f1 = qa_f1_score(prediction, answer)
             total_f1 += f1
-
-            # Save result
             result = {
-                "question": question,
-                "answer": answer,
-                "prediction": prediction,
-                "num_chunks_used": 0,
-                "chunk_scores": [],
-                "f1_score": f1
+                "question": question, "answer": answer, "prediction": prediction,
+                "num_chunks_used": 0, "chunk_scores": [], "f1_score": f1
             }
             results.append(result)
-
-            # Print progress
             if idx % 10 == 0 or idx == len(dataset):
                 print(f"[{idx}/{len(dataset)}] Avg F1: {total_f1 / idx:.4f}")
-
             continue
 
-        # Standard retrieval mode: chunk and retrieve
-        # Split into chunks
         chunks = text_to_chunks(context, chunk_size, overlap)
-
         if not chunks:
             print(f"[{idx}/{len(dataset)}] No chunks for entry, skipping")
             continue
 
-        # Retrieve top chunks
         top_chunks = retriever.retrieve(question, chunks)
-
-        # Get chunk texts
         selected_chunks = [chunks[chunk_idx] for chunk_idx, score in top_chunks]
-
-        # Build prompt
         context_text = "\n\n".join(selected_chunks)
-        prompt = prompt_template.format(
-            context=context_text,
-            input=question
-        )
-
-        # Generate answer
-        prediction = llm_generate(prompt, llm_endpoint, llm_model, llm_num_ctx)
-
-        # Compute F1 score
+        prompt = prompt_template.format(context=context_text, input=question)
+        prediction = llm_generate(prompt, generator=generator)
         f1 = qa_f1_score(prediction, answer)
         total_f1 += f1
-
-        # Save result
         result = {
-            "question": question,
-            "answer": answer,
-            "prediction": prediction,
+            "question": question, "answer": answer, "prediction": prediction,
             "num_chunks_used": len(selected_chunks),
             "chunk_scores": [score for _, score in top_chunks],
-            "retrieved_chunks": selected_chunks,
-            "f1_score": f1
+            "retrieved_chunks": selected_chunks, "f1_score": f1
         }
         results.append(result)
-
-        # Print progress
         if idx % 10 == 0 or idx == len(dataset):
             print(f"[{idx}/{len(dataset)}] Avg F1: {total_f1 / idx:.4f}")
 
-    # Organize output paths
-    dataset_name = Path(dataset_path).stem
-
-    # Determine limit prefix: limit_X or full
-    limit_prefix = f"limit_{args.limit}" if args.limit else "full"
-
-    # Create results directory structure: results/raw/[limit_X|full]/[dataset]/ and results/score/[limit_X|full]/[dataset]/
+    # Save results
+    limit_prefix = f"sample_{args.limit}" if args.limit else "full"
     raw_dir = Path("results/raw") / limit_prefix / dataset_name
     score_dir = Path("results/score") / limit_prefix / dataset_name
     raw_dir.mkdir(parents=True, exist_ok=True)
     score_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save raw results to results/raw/[limit_X|full]/[dataset]/[model].jsonl
     output_name = f"{model_type}_{args.model_suffix}" if args.model_suffix else model_type
     raw_output = raw_dir / f"{output_name}.jsonl"
     with open(raw_output, 'w') as f:
         for result in results:
             f.write(json.dumps(result) + '\n')
 
-    # Calculate and save scores to results/score/[limit_X|full]/[dataset]/[model].json
-    score_output = score_dir / f"{output_name}.json"
     avg_f1 = total_f1 / len(results) if results else 0
     score_data = {
-        "model": model_type,
-        "dataset": dataset_name,
+        "model": model_type, "dataset": dataset_name,
         "limit": args.limit if args.limit else "full",
-        "total_samples": len(results),
-        "f1_score": round(avg_f1, 4)
+        "total_samples": len(results), "f1_score": round(avg_f1, 4)
     }
+    score_output = score_dir / f"{output_name}.json"
     with open(score_output, 'w') as f:
         json.dump(score_data, f, indent=2)
 
-    # Clean up GPU memory after retrieval
+    print(f"\n{'=' * 60}")
+    print(f"[{dataset_name}] Done! Samples: {len(results)}, Avg F1: {avg_f1:.4f}")
+    print(f"  Raw: {raw_output}")
+    print(f"  Score: {score_output}")
+    print(f"{'=' * 60}")
+
+    return score_data
+
+
+def run_inference(config: Dict[str, Any], dataset_path: str, output_path: str, args=None):
+    """
+    Run inference on one or multiple datasets.
+    If dataset_path is a directory, iterate over all .jsonl files (models loaded once).
+    """
+    # Collect dataset files
+    dp = Path(dataset_path)
+    if dp.is_dir():
+        dataset_files = sorted(dp.glob("*.jsonl"))
+    else:
+        dataset_files = [dp]
+
+    if not dataset_files:
+        print(f"No .jsonl files found in {dataset_path}")
+        return
+
+    # Initialize models once
+    retriever = UnifiedRetriever(config, device=args.device)
+
+    generator_config = config["inference"]["generator"]
+    llm_model = generator_config["model"]
+    generator = VLLMGenerator(
+        model_path=llm_model,
+        device=args.llm_device,
+        max_tokens=generator_config["max_new_tokens"],
+        max_model_len=generator_config["max_model_len"],
+        temperature=generator_config["temperature"],
+        top_p=generator_config["top_p"],
+    )
+
+    print(f"Loaded models. Running on {len(dataset_files)} dataset(s)...")
+
+    # Run inference on each dataset
+    all_scores = []
+    for ds_file in dataset_files:
+        score = run_inference_single(config, str(ds_file), args, retriever, generator)
+        all_scores.append(score)
+
+    # Clean up
+    generator.shutdown()
     del retriever
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print(f"GPU memory cleared for device: {args.device}")
+        print(f"GPU memory cleared")
 
-    # Print summary
-    print(f"\n" + "=" * 60)
-    print(f"Inference Complete!")
-    print(f"=" * 60)
-    print(f"Total samples: {len(results)}")
-    print(f"Average F1: {score_data.get('f1_score', 0):.4f}")
-    print(f"Raw results saved to: {raw_output}")
-    print(f"Scores saved to: {score_output}")
-    print(f"=" * 60)
+    # Print overall summary
+    if len(all_scores) > 1:
+        print(f"\n" + "=" * 60)
+        print(f"All Datasets Complete!")
+        print(f"=" * 60)
+        for s in all_scores:
+            print(f"  {s['dataset']:20s} F1: {s['f1_score']:.4f}  ({s['total_samples']} samples)")
+        overall_f1 = sum(s['f1_score'] for s in all_scores) / len(all_scores)
+        print(f"  {'AVERAGE':20s} F1: {overall_f1:.4f}")
+        print(f"=" * 60)
 
 
 def main():
@@ -285,8 +274,8 @@ def main():
     parser.add_argument(
         "--llm-config",
         type=str,
-        default="src/config/llm_inference.yaml",
-        help="LLM inference config file (default: src/config/llm_inference.yaml)"
+        default="src/config/llm.yaml",
+        help="LLM config file (default: src/config/llm.yaml)"
     )
     parser.add_argument(
         "--retrieval-config",
@@ -298,7 +287,13 @@ def main():
         "--device",
         type=str,
         default="cuda:0",
-        help="CUDA device"
+        help="CUDA device for retriever"
+    )
+    parser.add_argument(
+        "--llm-device",
+        type=str,
+        default="cuda:1",
+        help="CUDA device for vLLM LLM server"
     )
     parser.add_argument(
         "--retriever",

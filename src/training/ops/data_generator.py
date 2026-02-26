@@ -1,8 +1,10 @@
 """
-Training data generation for Stage 1/2/3 with ms-swift InfoNCE format.
+Training data generation for Stage 1/2/3 with ms-swift embedding format.
+Output: {"messages": [...], "positive_messages": [[...], ...], "negative_messages": [[...], ...]}
 """
 
 import json
+import random
 from pathlib import Path
 from typing import List, Dict, Optional
 from tqdm import tqdm
@@ -11,11 +13,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _to_swift_embedding(query: str, positive: str, negatives: List[str]) -> dict:
+    """Convert to ms-swift embedding format (single positive per sample)."""
+    return {
+        "messages": [{"role": "user", "content": query}],
+        "positive_messages": [[{"role": "user", "content": positive}]],
+        "negative_messages": [[{"role": "user", "content": n}] for n in negatives],
+    }
+
+
 def generate_stage1_data(
     alignment_data: List[Dict],
     output_file: str,
     num_positives: int = 3,
-    num_negatives: Optional[int] = None
+    num_negatives: Optional[int] = None,
+    full_chunks_data: Optional[List[List[str]]] = None
 ) -> int:
     """
     Generate Stage 1 training data (chunk alignment with random negatives from same entry).
@@ -32,7 +44,6 @@ def generate_stage1_data(
     Returns:
         Number of training samples generated
     """
-    import random
     logger.info(f"Generating Stage 1 training data (num_positives={num_positives})...")
 
     output_path = Path(output_file)
@@ -42,7 +53,7 @@ def generate_stage1_data(
     num_skipped = 0
 
     with open(output_path, 'w', encoding='utf-8') as f:
-        for sample in tqdm(alignment_data, desc="Stage 1"):
+        for idx, sample in enumerate(tqdm(alignment_data, desc="Stage 1")):
             query = sample.get('input', '')
             chunks = sample.get('chunk_list', [])
             scores = sample.get('score_list', [])
@@ -62,26 +73,22 @@ def generate_stage1_data(
             positive_chunks = [chunks[sorted_indices[i]] for i in range(top_k)]
             positive_chunks_set = set(positive_chunks)
 
-            # Get negative chunks (all non-positive chunks from this entry)
-            negative_chunks = [c for c in chunks if c not in positive_chunks_set]
+            # Get negative chunks from full chunk list if available, else from alignment chunks
+            neg_pool = full_chunks_data[idx] if full_chunks_data and idx < len(full_chunks_data) else chunks
+            negative_chunks = [c for c in neg_pool if c not in positive_chunks_set]
 
             if not negative_chunks:
                 num_skipped += 1
                 continue
 
-            # Random sample if num_negatives specified
-            if num_negatives is not None and len(negative_chunks) > num_negatives:
-                negative_chunks = random.sample(negative_chunks, num_negatives)
-
-            # Generate one sample per positive
-            for positive_chunk in positive_chunks:
-                training_sample = {
-                    "query": query,
-                    "response": positive_chunk,
-                    "rejected_response": negative_chunks
-                }
-
-                f.write(json.dumps(training_sample, ensure_ascii=False) + '\n')
+            # Each positive gets independently sampled negatives
+            for pos in positive_chunks:
+                if num_negatives is not None and len(negative_chunks) > num_negatives:
+                    sampled_neg = random.sample(negative_chunks, num_negatives)
+                else:
+                    sampled_neg = negative_chunks
+                sample_out = _to_swift_embedding(query, pos, sampled_neg)
+                f.write(json.dumps(sample_out, ensure_ascii=False) + '\n')
                 num_samples += 1
 
     logger.info(f"Generated {num_samples} Stage 1 samples (skipped {num_skipped})")
@@ -151,18 +158,15 @@ def generate_stage2_data(
                 num_skipped += 1
                 continue
 
-            if num_negatives is not None:
-                negative_chunks = negative_chunks[:num_negatives]
-
-            # Generate one sample per positive
-            for positive_chunk in positive_chunks:
-                training_sample = {
-                    "query": query,
-                    "response": positive_chunk,
-                    "rejected_response": negative_chunks
-                }
-
-                f.write(json.dumps(training_sample, ensure_ascii=False) + '\n')
+            # Each positive gets independently sampled negatives
+            for pos in positive_chunks:
+                if num_negatives is not None and len(negative_chunks) > num_negatives:
+                    sampled_neg = random.sample(negative_chunks, num_negatives)
+                else:
+                    sampled_neg = list(negative_chunks)
+                random.shuffle(sampled_neg)
+                sample_out = _to_swift_embedding(query, pos, sampled_neg)
+                f.write(json.dumps(sample_out, ensure_ascii=False) + '\n')
                 num_samples += 1
 
     logger.info(f"Generated {num_samples} Stage 2 samples (skipped {num_skipped})")
@@ -232,18 +236,15 @@ def generate_stage3_data(
                 num_skipped += 1
                 continue
 
-            if num_negatives is not None:
-                negative_chunks = negative_chunks[:num_negatives]
-
-            # Generate one sample per positive
-            for positive_chunk in positive_chunks:
-                training_sample = {
-                    "query": query,
-                    "response": positive_chunk,
-                    "rejected_response": negative_chunks
-                }
-
-                f.write(json.dumps(training_sample, ensure_ascii=False) + '\n')
+            # Each positive gets independently sampled negatives
+            for pos in positive_chunks:
+                if num_negatives is not None and len(negative_chunks) > num_negatives:
+                    sampled_neg = random.sample(negative_chunks, num_negatives)
+                else:
+                    sampled_neg = list(negative_chunks)
+                random.shuffle(sampled_neg)
+                sample_out = _to_swift_embedding(query, pos, sampled_neg)
+                f.write(json.dumps(sample_out, ensure_ascii=False) + '\n')
                 num_samples += 1
 
     logger.info(f"Generated {num_samples} Stage 3 samples (skipped {num_skipped})")

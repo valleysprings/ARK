@@ -29,7 +29,7 @@ from src.kg.utils.text_processing import (
     compute_mdhash_id,
     doc_to_chunks,
 )
-from src.kg.utils.llm_client import google_model, gpt_model, deepseek_model
+from src.kg.utils.llm_client import google_model, gpt_model, deepseek_model, vllm_model
 from src.kg.utils.file_operations import (
     cache_exists,
     load_cache,
@@ -713,6 +713,7 @@ class KGBuilder:
             'gpt': gpt_model,
             'openai': gpt_model,
             'deepseek': deepseek_model,
+            'vllm': vllm_model,
         }
 
         llm_func = provider_map.get(provider.lower())
@@ -806,9 +807,9 @@ class KGBuilder:
 
         # Get chunk sizes from config if not provided
         if chunk_size is None:
-            chunk_size = self.config.get('kg', {}).get('chunk_size', 512)
+            chunk_size = self.config['kg']['chunk_size']
         if overlap_size is None:
-            overlap_size = self.config.get('kg', {}).get('chunk_overlap', 64)
+            overlap_size = self.config['kg']['chunk_overlap']
 
         # Check cache for entities
         cache_path = None
@@ -848,6 +849,6 @@ class KGBuilder:
             Dictionary with chunk_size and chunk_overlap
         """
         return {
-            'chunk_size': self.config.get('kg', {}).get('chunk_size', 512),
-            'chunk_overlap': self.config.get('kg', {}).get('chunk_overlap', 64),
+            'chunk_size': self.config['kg']['chunk_size'],
+            'chunk_overlap': self.config['kg']['chunk_overlap'],
         }

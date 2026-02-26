@@ -188,9 +188,19 @@ class QueryGenerator:
         Returns:
             List of generated queries
         """
-        # Load subgraph (old format: list of dicts)
+        # Load subgraph (pretty-printed jsonl with indent)
+        subgraph_data = []
         with open(subgraph_path, 'r', encoding='utf-8') as f:
-            subgraph_data = json.load(f)
+            content = f.read()
+        decoder = json.JSONDecoder()
+        idx = 0
+        while idx < len(content):
+            if content[idx] in ' \t\n\r':
+                idx += 1
+                continue
+            obj, end = decoder.raw_decode(content, idx)
+            subgraph_data.append(obj)
+            idx = end
 
         # Convert to entities list
         entities = []

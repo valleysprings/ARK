@@ -44,7 +44,7 @@ import yaml
 import numpy as np
 
 # Import from src.kg.utils
-from src.kg.utils.embeddings import ollama_embedding
+from src.kg.utils.embeddings import ollama_embedding, create_local_embedding
 from src.kg.utils.text_processing import compute_mdhash_id
 
 # Import from src.kg
@@ -127,16 +127,14 @@ class AugmentationConfig:
         Returns:
             AugmentationConfig instance
         """
-        kg_config = config.get('kg', {})
-        graph_config = kg_config.get('graph', {})
-        paths_config = config.get('paths', {})
+        graph_config = config['kg']['graph']
 
         return cls(
-            similarity_threshold=graph_config.get('similarity_threshold', 0.8),
-            enable_augmentation=graph_config.get('enable_augmentation', True),
-            embedding_batch_size=graph_config.get('embedding_batch_size', 128),
+            similarity_threshold=graph_config['similarity_threshold'],
+            enable_augmentation=graph_config['enable_augmentation'],
+            embedding_batch_size=graph_config['embedding_batch_size'],
             vectordb_namespace="entities",
-            working_dir=paths_config.get('cache_root', './data/preprocessed'),
+            working_dir=config.get('cache_root', './data/preprocessed'),
             dataset_name=config.get('dataset_name', 'default'),
             entry_id=config.get('entry_id', None)
         )
@@ -455,7 +453,9 @@ class GraphAugmentor:
         self,
         config_path: Optional[str] = None,
         config: Optional[AugmentationConfig] = None,
-        embedding_func: Any = None
+        embedding_func: Any = None,
+        embedding_provider: Optional[str] = None,
+        embedding_model_path: Optional[str] = None,
     ):
         """
         Initialize GraphAugmentor
@@ -463,12 +463,13 @@ class GraphAugmentor:
         Args:
             config_path: Path to config.yaml file (overrides config parameter)
             config: AugmentationConfig instance (used if config_path not provided)
-            embedding_func: Custom embedding function (defaults to ollama_embedding)
+            embedding_func: Custom embedding function (overrides provider)
+            embedding_provider: "ollama" | "bge" | "qwen" (default: ollama)
+            embedding_model_path: Model path for bge/qwen provider
         """
         if config_path is not None:
             self.config = AugmentationConfig.from_config(config_path)
         elif config is not None:
-            # If config is a dict, create AugmentationConfig from it
             if isinstance(config, dict):
                 self.config = AugmentationConfig.from_dict(config)
             else:
@@ -476,7 +477,14 @@ class GraphAugmentor:
         else:
             self.config = AugmentationConfig()
 
-        self.embedding_func = embedding_func or ollama_embedding
+        if embedding_func is not None:
+            self.embedding_func = embedding_func
+        elif embedding_provider in ("bge", "qwen"):
+            defaults = {"bge": "model/raw/bge-m3", "qwen": "model/raw/qwen3"}
+            path = embedding_model_path or defaults[embedding_provider]
+            self.embedding_func = create_local_embedding(path, embedding_provider)
+        else:
+            self.embedding_func = ollama_embedding
         self.vectorizer: Optional[NanoVectorDBStorage] = None
 
         logger.info(f"GraphAugmentor initialized with threshold={self.config.similarity_threshold}")

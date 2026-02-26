@@ -25,7 +25,6 @@ This directory contains implementations of state-of-the-art baseline RAG methods
 **Clone Info**:
 - Branch: `main`
 - Commit: `242abfb` (June 24, 2025)
-- Fetched: January 2, 2026
 
 ---
 
